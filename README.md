@@ -10,7 +10,7 @@
 
   <br/>
 
-  **Building acquisition-aware foundation models for radiology — one modality at a time.**
+  **Building acquisition-aware foundation models for radiology**
 
 </div>
 
