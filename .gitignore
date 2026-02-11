@@ -1,0 +1,60 @@
+# ───────────────────────────────────────────
+# MaRaI — Root .gitignore
+# ───────────────────────────────────────────
+
+# OS files
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & Experiments
+**/wandb/
+**/logs/
+
+# Model weights (store links, not files)
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Data
+*.nii
+*.nii.gz
+*.dcm
+*.npy
+*.npz
+
+# Misc
+core.*
+*.pdf
+**/_*
+sync.sh
+gpu*sync.sh
+*.jsonl
