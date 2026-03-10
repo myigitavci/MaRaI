@@ -54,7 +54,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 ### MR-CLIP 3D — Volume-Level Foundation Model
 
 <div align="center">
-  <b>🧊 NEW: 3D Vision Encoder</b>
+  <img src="docs/mr-clip-3d.png" alt="3D MR-CLIP" width="700"/>
 </div>
 
 <br/>
