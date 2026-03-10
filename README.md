@@ -75,7 +75,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | Model | Type | Input | Config | Download |
 |:------|:-----|:------|:-------|:---------|
 | MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
-| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 160×192×160, no skull | 🔜 [Coming Soon](#) |
+| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 128x128x128, no skull | 🔜 [Coming Soon](#) |
 
 
 ---
