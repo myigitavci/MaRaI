@@ -11,10 +11,10 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
 from .convert import convert_state_dict
-from .model import CLIP, CustomTextCLIP, convert_weights_to_lp, convert_to_custom_text_state_dict,\
+from .model import CLIP, CustomTextCLIP,CLIP_Vision,CLIP_Tabular,CLIP_3D, convert_weights_to_lp, convert_to_custom_text_state_dict,\
     resize_pos_embed, get_cast_dtype, resize_text_pos_embed, set_model_preprocess_cfg
 from .coca_model import CoCa
-from .loss import ClipLoss, DistillClipLoss, CoCaLoss, SigLipLoss, MultiPositiveClipLoss
+from .loss import ClipLoss, DistillClipLoss, CoCaLoss, SigLipLoss, MultiPositiveClipLoss,MultiPositiveClipLossVisionOnly,MultiPositiveClipLosswithVision,MultiPositiveClipLossWithDistance
 from .pretrained import is_pretrained_cfg, get_pretrained_cfg, download_pretrained,\
     list_pretrained_tags_by_model, download_pretrained_from_hf
 from .transform import image_transform_v2, AugmentationCfg, PreprocessCfg, merge_preprocess_dict, merge_preprocess_kwargs
@@ -222,8 +222,10 @@ def create_model(
         force_quick_gelu: bool = False,
         force_custom_text: bool = False,
         vision_only: bool = False,
+        vis_3d: bool = False,
         logitscaletrainable: bool = True,
         tabular: bool = False,
+        textcontextlength: int = 98,
         force_patch_dropout: Optional[float] = None,
         force_image_size: Optional[Union[int, Tuple[int, int]]] = None,
         force_preprocess_cfg: Optional[Dict[str, Any]] = None,
@@ -309,6 +311,9 @@ def create_model(
         logging.error(f'Model config for {model_name} not found; available models {list_models()}.')
         raise RuntimeError(f'Model config for {model_name} not found.')
 
+    if textcontextlength and "text_cfg" in model_cfg:
+        model_cfg["text_cfg"]["context_length"] = textcontextlength
+
     if force_quick_gelu:
         # override for use of QuickGELU on non-OpenAI transformer models
         model_cfg["quick_gelu"] = True
@@ -345,6 +350,8 @@ def create_model(
             model = CustomTextCLIP(**model_cfg, cast_dtype=cast_dtype)
     elif vision_only:
         model = CLIP_Vision(**model_cfg, cast_dtype=cast_dtype)
+    elif vis_3d:
+        model = CLIP_3D(**model_cfg, cast_dtype=cast_dtype)
     elif tabular:
         model = CLIP_Tabular(**model_cfg, cast_dtype=cast_dtype)
     else:
@@ -512,7 +519,9 @@ def create_model_and_transforms(
         force_quick_gelu: bool = False,
         force_custom_text: bool = False,
         vision_only: bool = False,
+        vis_3d: bool = False,
         tabular: bool = False,
+        textcontextlength: int = 98,
         force_patch_dropout: Optional[float] = None,
         force_image_size: Optional[Union[int, Tuple[int, int]]] = None,
         image_mean: Optional[Tuple[float, ...]] = None,
@@ -545,7 +554,9 @@ def create_model_and_transforms(
         cache_dir=cache_dir,
         output_dict=output_dict,
         vision_only=vision_only,
+        vis_3d=vis_3d,
         tabular=tabular,
+        textcontextlength=textcontextlength,
         **model_kwargs,
     )
 
@@ -554,11 +565,13 @@ def create_model_and_transforms(
     preprocess_train = image_transform_v2(
         pp_cfg,
         is_train=True,
+        vis_3d=vis_3d,
         aug_cfg=aug_cfg,
     )
     preprocess_val = image_transform_v2(
         pp_cfg,
         is_train=False,
+        vis_3d=vis_3d,
     )
 
     return model, preprocess_train, preprocess_val

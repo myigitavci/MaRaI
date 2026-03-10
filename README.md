@@ -3,7 +3,6 @@
 
   <br/><br/>
 
-
   [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
   [![PyTorch](https://img.shields.io/badge/Framework-PyTorch-EE4C2C.svg)](https://pytorch.org/)
   [![arXiv](https://img.shields.io/badge/arXiv-2507.00043-b31b1b.svg)](https://arxiv.org/abs/2507.00043)
@@ -31,7 +30,9 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 ---
 
-## 🚀 MR-CLIP — Base Foundation Model
+## 🚀 Available Models
+
+### MR-CLIP 2D — Slice-Level Foundation Model
 
 <div align="center">
   <img src="docs/mr-clip-overview.png" alt="MR-CLIP Architecture" width="700"/>
@@ -39,14 +40,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 <br/>
 
-<div align="center">
-
-  [![arXiv](https://img.shields.io/badge/arXiv-2507.00043-b31b1b.svg)](https://arxiv.org/abs/2507.00043)
-  [![Weights](https://img.shields.io/badge/Download-Pretrained%20Weights-blue.svg)](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing)
-
-</div>
-
-**MR-CLIP** is a multimodal contrastive learning framework that aligns MR images with their DICOM acquisition metadata to learn **contrast-aware representations** — without any manual labels. It serves as the **base model** that all future extensions in this repository build upon.
+**MR-CLIP** is a multimodal contrastive learning framework that aligns MR images with their DICOM acquisition metadata to learn **contrast-aware representations** — without any manual labels.
 
 **Key highlights:**
 - 🧲 Learns from raw acquisition parameters (Echo Time, Repetition Time, etc.)
@@ -57,13 +51,36 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 ---
 
-## ⚡ Getting Started
+### MR-CLIP 3D — Volume-Level Foundation Model
 
-### Prerequisites
+<div align="center">
+  <b>🧊 NEW: 3D Vision Encoder</b>
+</div>
 
-- Python ≥ 3.8
-- CUDA-capable GPU (recommended)
-- Conda or virtualenv
+<br/>
+
+**MR-CLIP 3D** extends the framework to operate directly on **volumetric MR data** using a 3D Vision Transformer backbone.
+
+**Key highlights:**
+- 📦 Processes full 3D volumes (NIfTI format)
+- 🧠 3D ViT-B/16-style encoder (`VisionTransformer3D`)
+- 🔧 Dedicated 3D preprocessing pipeline with robust normalization
+- 🎯 Multi-positive contrastive loss for protocol-level learning
+- ⚡ Gradient checkpointing for memory-efficient training
+
+---
+
+## 📦 Pretrained Weights
+
+| Model | Type | Input | Config | Download |
+|:------|:-----|:------|:-------|:---------|
+| MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
+| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 160×192×160, no skull | 🔜 [Coming Soon](#) |
+
+
+---
+
+## ⚡ Quick Start
 
 ### Installation
 
@@ -82,55 +99,96 @@ pip install -r requirements.txt
 
 The preprocessing pipeline converts raw NIfTI + DICOM data into training-ready CSV datasets:
 
-1. **NIfTI → PNG** — slice extraction, plane detection, normalization
-2. **CSV creation** — image paths + simplified DICOM metadata
-3. **Labeling** — unique labels from binned acquisition parameters
-4. **Splitting** — train / val / test with subject-level separation
-
 ```bash
 jupyter notebook preprocessing.ipynb
 ```
 
 ### Training & Testing
 
-**Download pre-trained weights:** [⬇️ 20×20 Weights](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) → place in `logs/mr_clip/checkpoints/`
+<table>
+<tr>
+<td width="50%">
+
+#### 📖 [Training Guide](docs/TRAINING.md)
+
+Detailed instructions for training MR-CLIP models:
+- 2D slice training
+- 3D volume training
+- Multi-GPU setup
+- Hyperparameter reference
+
+</td>
+<td width="50%">
+
+#### 📖 [Testing Guide](docs/TESTING.md)
+
+Detailed instructions for evaluation:
+- Running inference
+- Retrieval metrics
+- Saving embeddings
+- Output file formats
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🎯 Quick Examples
+
+### 2D Evaluation
 
 ```bash
 cd src
 python -m open_clip_train.main \
-    --report-to tensorboard \
+    --val-data=/path/to/test.csv \
     --csv-separator=, \
     --csv-img-key filepath \
     --csv-caption-key text \
-    --val-data=/path/to/your/test_data.csv \
-    --batch-size=1000 \
-    --workers=8 \
-    --logs=/path/to/logs \
-    --device=cuda \
     --dataset-type=csv \
     --model=ViT-B-16 \
-    --name=mr_clip \
+    --batch-size=512 \
+    --device=cuda \
+    --logs=/path/to/logs \
+    --name=mr_clip_2d \
     --resume=latest \
-    --distance \
-    --test \
-    --tracepreds
+    --test
 ```
 
-| Parameter | Description |
-|:---|:---|
-| `--val-data` | Path to your test data CSV |
-| `--batch-size` | Adjust based on GPU memory |
-| `--logs` | Directory for saving logs |
-| `--name` | Experiment name (weights go under this folder) |
-| `--tracepreds` | Save per-sample retrieval predictions to `mr_clip/checkpoints/` |
+### 3D Evaluation
+
+```bash
+cd src
+python -m open_clip_train.main \
+    --val-data=/path/to/test_3d.csv \
+    --csv-separator=, \
+    --csv-img-key filepath \
+    --csv-caption-key text \
+    --dataset-type=csv-3d \
+    --model=ViT-B-16 \
+    --vis_3d \
+    --force-image-size 128 128 128 \
+    --batch-size=32 \
+    --device=cuda \
+    --logs=/path/to/logs \
+    --name=mr_clip_3d \
+    --resume=latest \
+    --test
+```
+
+> 📖 See the [Training Guide](docs/TRAINING.md) and [Testing Guide](docs/TESTING.md) for complete documentation.
 
 ---
 
-## 📦 Pretrained Weights
+## 🔑 Key Parameters
 
-| Model | Resolution | Config | Download |
-|:---|:---|:---|:---|
-| MR-CLIP (ViT-B/16) | 20×20 bins | ET 20 · RT 20 | [⬇️ Google Drive](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
+| Parameter | 2D | 3D | Description |
+|:----------|:--:|:--:|:------------|
+| `--dataset-type` | `csv` | `csv-3d` | Dataset format |
+| `--vis_3d` | ❌ | ✅ | Enable 3D vision encoder |
+| `--force-image-size` | Optional | `D H W` | Input dimensions |
+| `--multipositiveloss` | ✅ | ✅ | Multi-positive contrastive loss |
+| `--grad-checkpointing` | Optional | Recommended | Memory-efficient training |
 
 ---
 
@@ -147,6 +205,15 @@ If you use any code or models from this repository, please cite:
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2507.00043}, 
+}
+@misc{avci2025metadataaligned3dmrirepresentations,
+      title={Metadata-Aligned 3D MRI Representations for Contrast Understanding and Quality Control}, 
+      author={Mehmet Yigit Avci and Pedro Borges and Virginia Fernandez and Paul Wright and Mehmet Yigitsoy and Sebastien Ourselin and Jorge Cardoso},
+      year={2025},
+      eprint={2511.00681},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2511.00681}, 
 }
 ```
 

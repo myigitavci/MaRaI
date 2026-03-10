@@ -19,9 +19,9 @@ from .hf_model import HFTextEncoder
 from .modified_resnet import ModifiedResNet
 from .timm_model import TimmModel
 from .transformer import LayerNormFp32, LayerNorm, QuickGELU, Attention, VisionTransformer, TextTransformer,\
-    text_global_pool
-from .utils import to_2tuple
-
+    text_global_pool, Transformer
+from .utils import to_2tuple, to_3tuple
+#from .model_tumsyn import VisualTransformer_tumsyn
 
 @dataclass
 class CLIPVisionCfg:
@@ -52,7 +52,7 @@ class CLIPVisionCfg:
     timm_proj_bias: bool = False  # enable bias final projection
     timm_drop: float = 0.  # head dropout
     timm_drop_path: Optional[float] = None  # backbone stochastic depth
-
+    rgb: bool = False
 
 @dataclass
 class CLIPTextCfg:
@@ -166,6 +166,7 @@ def _build_vision_tower(
             output_dim=embed_dim,
             act_layer=act_layer,
             norm_layer=norm_layer,
+            rgb=vision_cfg.rgb,
         )
 
     return visual
@@ -367,6 +368,329 @@ class TabularEncoder(nn.Module):
     def forward(self, x):
         return self.encoder(x)
         
+class CLIP_Tabular(nn.Module):
+    output_dict: torch.jit.Final[bool]
+    def __init__(
+            self,
+            embed_dim: int,
+            vision_cfg: CLIPVisionCfg,
+            quick_gelu: bool = False,
+            init_logit_scale: float = np.log(1 / 0.1),
+            init_logit_bias: Optional[float] = None,
+            nonscalar_logit_scale: bool = False,
+            cast_dtype: Optional[torch.dtype] = None,
+            output_dict: bool = False,
+            tabular_input_size: int = 1,
+    ):
+        super().__init__()
+        self.output_dict = output_dict
+
+        self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
+        self.projector_visual = SimCLRProjectionHead(embed_dim, embed_dim, 128)
+        self.projector_tabular = SimCLRProjectionHead(embed_dim, embed_dim, 128)
+        self.tabular_encoder = TabularEncoder(tabular_input_size,2,embed_dim)
+        lshape = [1] if nonscalar_logit_scale else []
+        self.logit_scale = torch.ones(lshape) * init_logit_scale
+
+    def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
+        # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+        self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.visual.set_grad_checkpointing(enable)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        # for timm optimizers, 1d params like logit_scale, logit_bias, ln/bn scale, biases are excluded by default
+        no_wd = {'positional_embedding'}
+        if hasattr(self.visual, 'no_weight_decay'):
+            for n in self.visual.no_weight_decay():
+                no_wd.add('visual.' + n)
+        return no_wd
+
+    def encode_image(self, image, normalize: bool = False):
+        features = self.visual(image)
+        features= self.projector_visual(features)    
+        return F.normalize(features, dim=-1) if normalize else features
+
+    def encode_text(self, text, normalize: bool = False):
+        x = self.tabular_encoder(text)
+        x= self.projector_tabular(x)
+
+        return F.normalize(x, dim=-1) if normalize else x ##### CHECK THIS, LOGITS
+
+    def get_logits(self, image, text):
+        image_features = self.encode_image(image, normalize=False)
+        text_features = self.encode_text(text, normalize=False)
+        image_logits =  image_features @ text_features.T / self.logit_scale.exp()
+        if self.logit_bias is not None:
+            image_logits += self.logit_bias
+        text_logits = image_logits.T
+        return image_logits, text_logits
+
+    def forward(
+            self,
+            image: Optional[torch.Tensor] = None,
+            text: Optional[torch.Tensor] = None,
+    ):
+        image_features = self.encode_image(image, normalize=False) if image is not None else None
+        text_features = self.encode_text(text, normalize=False) if text is not None else None
+
+        if self.output_dict:
+            out_dict = {
+                "image_features": image_features,
+                "text_features": text_features,
+                "logit_scale": self.logit_scale.exp()
+            }
+            if self.logit_bias is not None:
+                out_dict['logit_bias'] = self.logit_bias
+            return out_dict
+
+        if self.logit_bias is not None:
+            return image_features, text_features, self.logit_scale.exp(), self.logit_bias
+        return image_features, text_features, self.logit_scale.exp()
+    
+class CLIP_Vision(nn.Module):
+    output_dict: torch.jit.Final[bool]
+
+    def __init__(
+            self,
+            embed_dim: int,
+            vision_cfg: CLIPVisionCfg,
+            text_cfg: CLIPTextCfg,
+            quick_gelu: bool = False,
+            init_logit_scale: float = np.log(1 / 0.07),
+            init_logit_bias: Optional[float] = None,
+            nonscalar_logit_scale: bool = False,
+            cast_dtype: Optional[torch.dtype] = None,
+            output_dict: bool = False,
+    ):
+        super().__init__()
+        self.output_dict = output_dict
+
+        self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
+
+        lshape = [1] if nonscalar_logit_scale else []
+        self.logit_scale = nn.Parameter(torch.ones(lshape) * init_logit_scale)
+        if init_logit_bias is not None:
+            self.logit_bias = nn.Parameter(torch.ones(lshape) * init_logit_bias)
+        else:
+            self.logit_bias = None
+
+    def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
+        # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+        self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.visual.set_grad_checkpointing(enable)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        # for timm optimizers, 1d params like logit_scale, logit_bias, ln/bn scale, biases are excluded by default
+        no_wd = {'positional_embedding'}
+        if hasattr(self.visual, 'no_weight_decay'):
+            for n in self.visual.no_weight_decay():
+                no_wd.add('visual.' + n)
+        return no_wd
+
+    def encode_image(self, image, normalize: bool = False):
+        features = self.visual(image)
+        return F.normalize(features, dim=-1) if normalize else features
+
+    def get_logits(self, image):
+        image_features = self.encode_image(image, normalize=True)
+        image_logits = self.logit_scale.exp() * image_features @ image_features.T
+        if self.logit_bias is not None:
+            image_logits += self.logit_bias
+        return image_logits
+
+    def forward(
+            self,
+            image: Optional[torch.Tensor] = None,
+            text: Optional[torch.Tensor] = None,
+    ):
+        image_features = self.encode_image(image, normalize=True) if image is not None else None
+
+        if self.output_dict:
+            out_dict = {
+                "image_features": image_features,
+                "logit_scale": self.logit_scale.exp()
+            }
+            if self.logit_bias is not None:
+                out_dict['logit_bias'] = self.logit_bias
+            return out_dict
+
+        if self.logit_bias is not None:
+            return image_features, self.logit_scale.exp(), self.logit_bias
+        return image_features, self.logit_scale.exp()
+
+class ViTB16_3D_CLIP(nn.Module):
+    """
+    ViT‑B/16 backbone for 3‑D volumes (224³) adapted for CLIP using VisionTransformer3D.
+    This is a wrapper for VisionTransformer3D for backward compatibility.
+    """
+    def __init__(
+        self,
+        in_chans: int = 1,
+        proj_dim: int = 512,
+        image_size: int = 224,
+        patch_size: int = 16,
+        width: int = 512,
+        layers: int = 12,
+        heads: int = 8,
+        mlp_ratio: float = 4.0,
+        ls_init_value: float = None,
+        patch_dropout: float = 0.,
+        no_ln_pre: bool = False,
+        pos_embed_type: str = 'learnable',
+        pool_type: str = 'tok',
+        final_ln_after_pool: bool = False,
+        act_layer: callable = nn.GELU,
+        norm_layer: callable = LayerNorm,
+        output_tokens: bool = False,
+    ):
+        super().__init__()
+        self.encoder = VisionTransformer3D(
+            image_size=image_size,
+            patch_size=patch_size,
+            in_channels=in_chans,
+            width=width,
+            layers=layers,
+            heads=heads,
+            mlp_ratio=mlp_ratio,
+            ls_init_value=ls_init_value,
+            output_dim=proj_dim,
+            patch_dropout=patch_dropout,
+            no_ln_pre=no_ln_pre,
+            pos_embed_type=pos_embed_type,
+            pool_type=pool_type,
+            final_ln_after_pool=final_ln_after_pool,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            output_tokens=output_tokens,
+        )
+        self.image_size = self.encoder.image_size
+
+    def set_grad_checkpointing(self, enable=True):
+        self.encoder.set_grad_checkpointing(enable)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+class CLIP_3D(nn.Module):
+    output_dict: torch.jit.Final[bool]
+
+    def __init__(
+            self,
+            embed_dim: int,
+            text_cfg: CLIPTextCfg,
+            vision_cfg: CLIPVisionCfg,
+            quick_gelu: bool = False,
+            init_logit_scale: float = np.log(1 / 0.07),
+            init_logit_bias: Optional[float] = None,
+            nonscalar_logit_scale: bool = False,
+            cast_dtype: Optional[torch.dtype] = None,
+            output_dict: bool = False,
+            logitscaletrainable: bool = True,
+    ):
+        super().__init__()
+        self.output_dict = output_dict
+
+        # Use ViTB16_3D_CLIP as the vision encoder for 3D data
+        print(f"Vision config: {vision_cfg}")
+        self.visual = ViTB16_3D_CLIP(in_chans=1, proj_dim=embed_dim,image_size=vision_cfg["image_size"])
+        #self.visual = VisualTransformer_tumsyn(input_resolution=224, patch_size=16, width=512, layers=12, heads=8, output_dim=embed_dim)
+
+        text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
+        self.transformer = text.transformer
+        self.context_length = text.context_length
+        self.vocab_size = text.vocab_size
+        self.token_embedding = text.token_embedding
+        self.positional_embedding = text.positional_embedding
+        self.ln_final = text.ln_final
+        self.text_projection = text.text_projection
+        self.text_pool_type = text.pool_type
+        self.register_buffer('attn_mask', text.attn_mask, persistent=False)
+
+        lshape = [1] if nonscalar_logit_scale else []
+        if logitscaletrainable:
+            self.logit_scale = nn.Parameter(torch.ones(lshape)*init_logit_scale)
+        else:
+            self.logit_scale = torch.ones(lshape) * np.log(10)
+        if init_logit_bias is not None:
+            self.logit_bias = nn.Parameter(torch.ones(lshape) * init_logit_bias)
+        else:
+            self.logit_bias = None
+
+    # def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
+    #     # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+    #     self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.visual.set_grad_checkpointing(enable)
+        self.transformer.grad_checkpointing = enable
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        # for timm optimizers, 1d params like logit_scale, logit_bias, ln/bn scale, biases are excluded by default
+        no_wd = {'positional_embedding'}
+        if hasattr(self.visual, 'no_weight_decay'):
+            for n in self.visual.no_weight_decay():
+                no_wd.add('visual.' + n)
+        return no_wd
+
+    def encode_image(self, image, normalize: bool = False):
+        features = self.visual(image)
+        return F.normalize(features, dim=-1) if normalize else features
+
+    def encode_text(self, text, normalize: bool = False):
+        cast_dtype = self.transformer.get_cast_dtype()
+        x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
+        x = x + self.positional_embedding.to(cast_dtype)
+        x = self.transformer(x, attn_mask=self.attn_mask)
+        x = self.ln_final(x)  # [batch_size, n_ctx, transformer.width]
+        x, _ = text_global_pool(x, text, self.text_pool_type)
+        if self.text_projection is not None:
+            if isinstance(self.text_projection, nn.Linear):
+                x = self.text_projection(x)
+            else:
+                x = x @ self.text_projection
+        return F.normalize(x, dim=-1) if normalize else x
+
+    def get_logits(self, image, text):
+        image_features = self.encode_image(image, normalize=True)
+        text_features = self.encode_text(text, normalize=True)
+        image_logits = self.logit_scale.exp() * image_features @ text_features.T
+        if self.logit_bias is not None:
+            image_logits += self.logit_bias
+        text_logits = image_logits.T
+        return image_logits, text_logits
+
+    def forward(
+            self,
+            image: Optional[torch.Tensor] = None,
+            text: Optional[torch.Tensor] = None,
+    ):
+        image_features = self.encode_image(image, normalize=True) if image is not None else None
+        text_features = self.encode_text(text, normalize=True) if text is not None else None
+
+        if self.output_dict:
+            out_dict = {
+                "image_features": image_features,
+                "text_features": text_features,
+                "logit_scale": self.logit_scale.exp()
+            }
+            if self.logit_bias is not None:
+                out_dict['logit_bias'] = self.logit_bias
+            return out_dict
+
+        if self.logit_bias is not None:
+            return image_features, text_features, self.logit_scale.exp(), self.logit_bias
+        return image_features, text_features, self.logit_scale.exp()
+    
 class CustomTextCLIP(nn.Module):
     output_dict: torch.jit.Final[bool]
 
@@ -687,3 +1011,173 @@ def get_model_tokenize_cfg(model):
     if vocab_size is not None:
         cfg['vocab_size'] = vocab_size
     return cfg
+
+class VisionTransformer3D(nn.Module):
+    output_tokens: torch.jit.Final[bool]
+
+    def __init__(
+            self,
+            image_size: int = 224,
+            patch_size: int = 16,
+            in_channels: int = 1,
+            width: int = 512,
+            layers: int = 12,
+            heads: int = 8,
+            mlp_ratio: float = 4.0,
+            ls_init_value: float = None,
+            output_dim: int = 512,
+            patch_dropout: float = 0.,
+            no_ln_pre: bool = False,
+            pos_embed_type: str = 'learnable',
+            pool_type: str = 'tok',
+            final_ln_after_pool: bool = False,
+            act_layer: callable = nn.GELU,
+            norm_layer: callable = LayerNorm,
+            output_tokens: bool = False,
+    ):
+        super().__init__()
+        from .utils import to_3tuple
+        from .transformer import _expand_token
+        assert pool_type in ('tok', 'avg', 'none')
+        self.output_tokens = output_tokens
+        D, H, W = self.image_size = to_3tuple(image_size)
+        pd, ph, pw = self.patch_size = to_3tuple(patch_size)
+        self.grid_size = (D // pd, H // ph, W // pw)
+        self.final_ln_after_pool = final_ln_after_pool
+        self.output_dim = output_dim
+
+        self.conv1 = nn.Conv3d(in_channels=in_channels, out_channels=width, kernel_size=(pd, ph, pw), stride=(pd, ph, pw), bias=False)
+
+        # class embeddings and positional embeddings
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))
+        num_patches = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
+        if pos_embed_type == 'learnable':
+            self.positional_embedding = nn.Parameter(
+                scale * torch.randn(num_patches + 1, width))
+        else:
+            raise ValueError('Only learnable pos_embed_type is supported for 3D ViT')
+
+        self.patch_dropout = nn.Identity()  # PatchDropout for 3D can be added if needed
+        self.ln_pre = nn.Identity() if no_ln_pre else norm_layer(width)
+        self.transformer = Transformer(
+            width,
+            layers,
+            heads,
+            mlp_ratio,
+            ls_init_value=ls_init_value,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+        )
+        self.ln_post = norm_layer(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+        self.init_parameters()
+        self.pool_type = pool_type
+
+    def init_parameters(self):
+        # Proper initialization as in 2D ViT
+        nn.init.normal_(self.class_embedding, std=0.02)
+        nn.init.normal_(self.positional_embedding, std=0.02)
+        
+        # Initialize Conv3d weights properly
+        nn.init.normal_(self.conv1.weight, std=0.02)
+        
+        # Initialize transformer weights
+        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
+        attn_std = self.transformer.width ** -0.5
+        fc_std = (2 * self.transformer.width) ** -0.5
+        
+        for block in self.transformer.resblocks:
+            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
+            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
+            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+        
+        # Initialize projection
+        if self.proj is not None:
+            nn.init.normal_(self.proj, std=self.transformer.width ** -0.5)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.transformer.grad_checkpointing = enable
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'positional_embedding', 'class_embedding'}
+
+    def _global_pool(self, x: torch.Tensor):
+        if self.pool_type == 'avg':
+            pooled, tokens = x[:, 1:].mean(dim=1), x[:, 1:]
+        elif self.pool_type == 'tok':
+            pooled, tokens = x[:, 0], x[:, 1:]
+        else:
+            pooled = tokens = x
+        return pooled, tokens
+
+    def forward(self, x: torch.Tensor):
+        from .transformer import _expand_token
+        
+        # Add input validation and numerical stability
+        if torch.isnan(x).any():
+            raise ValueError("Input contains NaN values")
+        
+        # Debug input stats
+        #print(f"Input stats - min: {x.min():.6f}, max: {x.max():.6f}, mean: {x.mean():.6f}, std: {x.std():.6f}")
+        
+        # Check conv1 weights before operation
+        if torch.isnan(self.conv1.weight).any():
+            raise ValueError("Conv1 weights contain NaN values")
+        
+        x = self.conv1(x)  # [B, width, D', H', W']
+        
+        # Check for NaN after conv1
+        if torch.isnan(x).any():
+            print(f"Conv1 output stats - min: {x.min():.6f}, max: {x.max():.6f}, mean: {x.mean():.6f}, std: {x.std():.6f}")
+            raise ValueError("NaN detected after conv1")
+            
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # [B, width, N]
+        x = x.permute(0, 2, 1)  # [B, N, width]
+        
+        # Add class token with proper dtype handling
+        class_tokens = _expand_token(self.class_embedding, x.shape[0]).to(x.dtype)
+        x = torch.cat([class_tokens, x], dim=1)  # [B, N+1, width]
+        
+        # Add positional embedding with proper dtype handling
+        x = x + self.positional_embedding.to(x.dtype)
+        
+        # Check for NaN after positional embedding
+        if torch.isnan(x).any():
+            raise ValueError("NaN detected after positional embedding")
+            
+        x = self.patch_dropout(x)
+        x = self.ln_pre(x)
+        
+        # Check for NaN after layer norm
+        if torch.isnan(x).any():
+            raise ValueError("NaN detected after ln_pre")
+            
+        x = self.transformer(x)
+        
+        # Check for NaN after transformer
+        if torch.isnan(x).any():
+            raise ValueError("NaN detected after transformer")
+            
+        x = self.ln_post(x)
+        
+        # Check for NaN after final layer norm
+        if torch.isnan(x).any():
+            raise ValueError("NaN detected after ln_post")
+            
+        pooled, tokens = self._global_pool(x)
+        
+        if self.proj is not None:
+            pooled = pooled @ self.proj
+            
+        # Final NaN check
+        if torch.isnan(pooled).any():
+            raise ValueError("NaN detected in final output")
+            
+        if self.output_tokens:
+            return pooled, tokens
+        return pooled
+

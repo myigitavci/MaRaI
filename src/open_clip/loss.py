@@ -4,6 +4,7 @@ import logging
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+#from statsmodels.distributions.empirical_distribution import ECDF
 try:
     import torch.distributed.nn
     from torch import distributed as dist
@@ -598,7 +599,7 @@ def gather_features_with_echotime_repetitiontime(
                 all_repetitiontime = torch.cat(gathered_repetitiontime, dim=0)
 
     return all_image_features, all_text_features, all_text_tokens, all_echotime, all_repetitiontime
-# EQ (3) in the Supervised Contrastive Loss paper
+# EQ (3) in the paper
 # def multi_positive_cross_entropy_loss(logits, pos_mask):
 #     """
 #     Computes a cross-entropy loss with multiple positive targets.
@@ -622,7 +623,7 @@ def gather_features_with_echotime_repetitiontime(
 #     loss_per_sample = loss_per_sample / num_positives.clamp(min=1)  # Avoid division by zero
 
 #     return loss_per_sample.mean()
-## EQ (2) in the Supervised Contrastive Loss paper
+## EQ (2) in the paper
 def multi_positive_cross_entropy_loss(logits, pos_mask):
     """
     Computes a supervised contrastive loss similar to Eq. (2).
@@ -745,3 +746,324 @@ class MultiPositiveClipLoss(ClipLoss):
         loss_txt = multi_positive_cross_entropy_loss(logits_per_text, pos_mask)
         total_loss = delta*loss_img + (1-delta)*loss_txt
         return {"multi contrastive_loss": total_loss} if output_dict else total_loss
+def empirical_cdf_scaling_gpu(distances):
+    """
+    Scales a distance matrix between 0 and 1 using the empirical cumulative distribution function (ECDF).
+    
+    Args:
+        distances (torch.Tensor): (n, n) pairwise distance matrix.
+
+    Returns:
+        torch.Tensor: (n, n) scaled distances in [0,1].
+    """
+    flat_distances = distances.flatten()  # Convert to 1D
+    _, indices = torch.sort(flat_distances)  # Sort values
+    ranks = torch.arange(len(flat_distances), dtype=torch.float, device=distances.device)
+    ecdf_scaled = ranks / (len(flat_distances) - 1)  # Normalize ranks to [0,1]
+    
+    # Reconstruct the original shape
+    scaled_distances = torch.zeros_like(flat_distances, dtype=torch.float)
+    scaled_distances[indices] = ecdf_scaled  # Assign ECDF values in original order
+    return scaled_distances.view(distances.shape)
+
+def multi_positive_cross_entropy_loss_with_distance(logits, pos_mask, distance,logit_scale):
+    """
+    Computes a cross-entropy loss with multiple positive targets.
+    Normalizes by the number of positives to prevent class imbalance.
+    """
+    #logging.info(f"Calculating ECDF")
+    dist_ecdf = empirical_cdf_scaling_gpu(distance)  # Use the GPU-based ECDF scaling
+
+    dist_ecdf = 2 * torch.clamp(dist_ecdf, 0, 2)
+    dist_ecdf = dist_ecdf * (torch.ones_like(pos_mask) - pos_mask)
+    #logging.info(f"Logits: {logits[0]}")
+    #logging.info(f"Distance: {distance[0]}")
+    # logging.info(f"Dist ECDF: {dist_ecdf[0]}")
+
+    #dist_ecdf = distance * (torch.ones_like(pos_mask) - pos_mask)
+
+    logits_max, _ = torch.max(logits+logit_scale*dist_ecdf, dim=1, keepdim=True)
+    logits = logits - logits_max.detach()  # Numerical stability
+    exp_logits = torch.exp(logits)
+
+    # Sum over positive pairs
+    pos_exp_sum = (exp_logits * pos_mask).sum(dim=1)
+
+    # Sum over all pairs (denominator of softmax)
+    all_exp_sum = exp_logits.sum(dim=1)
+
+    # Compute per-sample loss
+    loss_per_sample = -torch.log((pos_exp_sum / (all_exp_sum + 1e-12)) + 1e-12)
+
+    # Normalize by number of positives per sample
+    num_positives = pos_mask.sum(dim=1)  # Count of positives per row
+    loss_per_sample = loss_per_sample / num_positives.clamp(min=1)  # Avoid division by zero
+
+    return loss_per_sample.mean()
+
+# New loss class that inherits from ClipLoss and uses multi-positive loss.
+class MultiPositiveClipLossWithDistance(ClipLoss):
+    def get_logits_custom(self, image_features, text_features, text_tokens, echotime, repetitiontime, logit_scale):
+        if self.world_size > 1:
+            all_image_features, all_text_features, text_tokens2, all_echotime, all_repetitiontime = gather_features_with_echotime_repetitiontime(
+                image_features,
+                text_features,
+                text_tokens,
+                echotime,
+                repetitiontime,
+                local_loss=self.local_loss,
+                gather_with_grad=self.gather_with_grad,
+                rank=self.rank,
+                world_size=self.world_size,
+                use_horovod=self.use_horovod,
+            )
+            if self.local_loss:
+                logits_per_image = logit_scale * image_features @ all_text_features.T
+                logits_per_text = logit_scale * text_features @ all_image_features.T
+            else:
+                logits_per_image = logit_scale * all_image_features @ all_text_features.T
+                logits_per_text = logits_per_image.T
+            return logits_per_image, logits_per_text, text_tokens2, all_echotime, all_repetitiontime
+        else:
+            logits_per_image = logit_scale * image_features @ text_features.T
+            logits_per_text = logit_scale * text_features @ image_features.T
+            return logits_per_image, logits_per_text, text_tokens, echotime, repetitiontime
+
+    def forward(self, image_features, text_features, logit_scale,echotime, repetitiontime,  delta=0.5, tokenized_texts=None, output_dict=False):
+        """
+        If tokenized_texts is provided, derive labels from the tokenized representations.
+        Samples with identical tokenized texts get the same label.
+        Then compute the multi-positive contrastive loss.
+        """
+        device = image_features.device
+        # Get logits using the parent's get_logits (which takes into account gather_with_grad and local_loss)
+        if self.world_size > 1:
+            logits_per_image, logits_per_text, tokenized_texts2, all_echotime, all_repetitiontime = self.get_logits_custom(
+                image_features, text_features, tokenized_texts, echotime, repetitiontime, logit_scale)
+        else:
+            logits_per_image, logits_per_text, tokenized_texts2, all_echotime, all_repetitiontime = self.get_logits_custom(
+                image_features, text_features, tokenized_texts, echotime, repetitiontime, logit_scale)
+            tokenized_texts2 = None
+        # Derive labels from tokenized texts if provided.
+
+        batch_labels = tokenized_texts
+        pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels.unsqueeze(0)).float().to(device)
+
+        # print(f"logits_per_image shape: {logits_per_image.shape}")
+        if tokenized_texts2 is not None:
+            batch_labels_all = tokenized_texts2
+            # Create positive mask: pos_mask[i, j] = 1 if samples i and j share the same label.
+            pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels_all.unsqueeze(0)).float().to(device)
+                # Print shapes for debugging
+        #logging.info(f"Calculating distance")
+        #distance=mahalanobis_distance_batchwise(echotime,repetitiontime,all_echotime,all_repetitiontime)
+        distance=mahalanobis_distance_batchwise(echotime,repetitiontime,all_echotime,all_repetitiontime)
+        # print(f"allechotime shape: {all_echotime.shape}")
+        # print(f"all_repetitiontime shape: {all_repetitiontime.shape}")
+        # print(f"pos_mask shape: {pos_mask.shape}")
+        # print(f"distance shape: {distance.shape}")
+        # Compute multi-positive loss for image-to-text and text-to-image.
+        #logging.info(f"Calculating loss")
+        loss_img = multi_positive_cross_entropy_loss_with_distance(logits_per_image, pos_mask,distance,logit_scale)
+        loss_txt = multi_positive_cross_entropy_loss_with_distance(logits_per_text, pos_mask,distance,logit_scale)
+        total_loss = delta*loss_img + (1-delta)*loss_txt
+        return {"multi contrastive_loss": total_loss} if output_dict else total_loss
+# New loss class that inherits from ClipLoss and uses multi-positive loss.
+class MultiPositiveClipLossVisionOnly(MultiPositiveClipLoss):
+    def get_logits_custom(self, image_features, text_features, text_tokens, logit_scale):
+        if self.world_size > 1:
+            all_image_features, all_text_features, text_tokens2 = gather_features_with_tokens(
+                image_features,
+                text_features,
+                text_tokens,
+                local_loss=self.local_loss,
+                gather_with_grad=self.gather_with_grad,
+                rank=self.rank,
+                world_size=self.world_size,
+                use_horovod=self.use_horovod,
+            )
+            if self.local_loss:
+                logits_per_image = logit_scale * image_features @ all_text_features.T
+            else:
+                logits_per_image = logit_scale * all_image_features @ all_text_features.T
+            return logits_per_image, text_tokens2
+        else:
+            logits_per_image = logit_scale * image_features @ text_features.T
+            return logits_per_image, text_tokens
+        
+    def forward(self, image_features, logit_scale, tokenized_texts=None, output_dict=False):
+        """
+        If tokenized_texts is provided, derive labels from the tokenized representations.
+        Samples with identical tokenized texts get the same label.
+        Then compute the multi-positive contrastive loss.
+        """
+        device = image_features.device
+        # Get logits using the parent's get_logits (which takes into account gather_with_grad and local_loss)
+        if self.world_size > 1:
+            logits_per_image, tokenized_texts2 = self.get_logits_custom(image_features, image_features, tokenized_texts, logit_scale)
+        else:
+            logits_per_image, _ = self.get_logits(image_features, image_features, logit_scale)
+            tokenized_texts2 = None
+
+        # Print shapes for debugging
+        # print(f"image_features shape: {image_features.shape}")
+        # print(f"text_features shape: {text_features.shape}")
+        # print(f"logits_per_image shape: {logits_per_image.shape}")
+
+        batch_labels = torch.tensor(tokenized_texts, device=device).long()
+        pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels.unsqueeze(0)).float().to(device)
+
+        if tokenized_texts2 is not None:
+            batch_labels_all = torch.tensor(tokenized_texts2, device=device).long()
+            # Create positive mask: pos_mask[i, j] = 1 if samples i and j share the same label.
+            pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels_all.unsqueeze(0)).float().to(device)
+            
+        # Print shapes for debugging
+        # print(f"batch_labels shape: {batch_labels.shape}")
+        if tokenized_texts2 is not None:
+            # print(f"batch_labels_all shape: {batch_labels_all.shape}")
+            pass
+        # print(f"pos_mask shape: {pos_mask.shape}")
+        # Detach and move to CPU for printing
+        # print(f"pos_mask: {pos_mask.detach().cpu()}")
+        # print(f"tokenized_texts2: {tokenized_texts2.detach().cpu() if tokenized_texts2 is not None else None}")
+        # print(f"tokenized_texts: {tokenized_texts.detach().cpu() if tokenized_texts is not None else None}")
+        pos_mask.diagonal().zero_()
+        # Compute multi-positive loss for image-to-text and text-to-image.
+        loss_img = multi_positive_cross_entropy_loss(logits_per_image, pos_mask)
+        total_loss = (loss_img )
+        return {"multi contrastive_loss": total_loss} if output_dict else total_loss
+
+class MultiPositiveClipLosswithVision(ClipLoss):
+    def get_logits_custom(self, image_features, text_features, text_tokens, logit_scale):
+        if self.world_size > 1:
+            all_image_features, all_text_features, text_tokens2 = gather_features_with_tokens(
+                image_features,
+                text_features,
+                text_tokens,
+                local_loss=self.local_loss,
+                gather_with_grad=self.gather_with_grad,
+                rank=self.rank,
+                world_size=self.world_size,
+                use_horovod=self.use_horovod,
+            )
+            if self.local_loss:
+                logits_per_image = logit_scale * image_features @ all_text_features.T
+                logits_per_text = logit_scale * text_features @ all_image_features.T
+            else:
+                logits_per_image = logit_scale * all_image_features @ all_text_features.T
+                logits_per_text = logits_per_image.T
+            return logits_per_image, logits_per_text, text_tokens2
+        else:
+            logits_per_image = logit_scale * image_features @ text_features.T
+            logits_per_text = logit_scale * text_features @ image_features.T
+            return logits_per_image, logits_per_text, text_tokens
+
+    def forward(self, image_features, text_features, logit_scale, lam=0.3, tokenized_texts=None, output_dict=False):
+        """
+        If tokenized_texts is provided, derive labels from the tokenized representations.
+        Samples with identical tokenized texts get the same label.
+        Then compute the multi-positive contrastive loss.
+        """
+        device = image_features.device
+        # Get logits using the parent's get_logits (which takes into account gather_with_grad and local_loss)
+        if self.world_size > 1:
+            logits_per_image, logits_per_text, tokenized_texts2 = self.get_logits_custom(image_features, text_features, tokenized_texts, logit_scale)
+            logits_per_image_image, tokenized_texts2 = MultiPositiveClipLossVisionOnly.get_logits_custom(image_features, image_features, tokenized_texts, logit_scale)
+        else:
+            logits_per_image, logits_per_text = self.get_logits(image_features, text_features, logit_scale)
+            logits_per_image_image, _ = self.get_logits(image_features, image_features, logit_scale)
+
+            tokenized_texts2 = None
+
+        # Print shapes for debugging
+        # print(f"image_features shape: {image_features.shape}")
+        # print(f"text_features shape: {text_features.shape}")
+        # print(f"logits_per_image shape: {logits_per_image.shape}")
+        # print(f"logits_per_text shape: {logits_per_text.shape}")
+        if tokenized_texts is not None:
+            # print(f"tokenized_texts shape: {tokenized_texts.shape}")
+            pass
+        if tokenized_texts2 is not None:
+            # print(f"tokenized_texts2 shape: {tokenized_texts2.shape}")
+            pass
+
+        # Derive labels from tokenized texts if provided.
+        batch_labels = torch.tensor(tokenized_texts, device=device).long()
+        pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels.unsqueeze(0)).float().to(device)
+
+        if tokenized_texts2 is not None:
+            batch_labels_all = torch.tensor(tokenized_texts2, device=device).long()
+            # Create positive mask: pos_mask[i, j] = 1 if samples i and j share the same label.
+            pos_mask = torch.eq(batch_labels.unsqueeze(1), batch_labels_all.unsqueeze(0)).float().to(device)
+
+        # Print shapes for debugging
+        # print(f"batch_labels shape: {batch_labels.shape}")
+        if tokenized_texts2 is not None:
+            # print(f"batch_labels_all shape: {batch_labels_all.shape}")
+            pass
+        # print(f"pos_mask shape: {pos_mask.shape}")
+        # Detach and move to CPU for printing
+        # print(f"pos_mask: {pos_mask.detach().cpu()}")
+        # print(f"tokenized_texts2: {tokenized_texts2.detach().cpu() if tokenized_texts2 is not None else None}")
+        # print(f"tokenized_texts: {tokenized_texts.detach().cpu() if tokenized_texts is not None else None}")
+
+        # Compute multi-positive loss for image-to-text and text-to-image.
+        loss_img = multi_positive_cross_entropy_loss(logits_per_image, pos_mask)
+        loss_txt = multi_positive_cross_entropy_loss(logits_per_text, pos_mask)
+        
+        pos_mask.diagonal().zero_()
+        loss_img_to_img = multi_positive_cross_entropy_loss(logits_per_image_image, pos_mask)
+
+        #total_loss = (loss_img + loss_txt)/2 + lam*loss_img_to_img
+        return {"loss_img": loss_img,"loss_txt": loss_txt,"loss_img_to_img": loss_img_to_img} if output_dict else loss_img,loss_txt,loss_img_to_img
+
+def weighted_euclidean_distance_batchwise(te, tr, all_te, all_tr, w_te=0.2, w_tr=10.0):
+    """
+    Computes pairwise weighted Euclidean distances between local batch and all gathered batches.
+    
+    Args:
+        te (torch.Tensor): (local_batch_size,) tensor of local echo times.
+        tr (torch.Tensor): (local_batch_size,) tensor of local repetition times.
+        all_te (torch.Tensor): (global_batch_size,) tensor of all gathered echo times.
+        all_tr (torch.Tensor): (global_batch_size,) tensor of all gathered repetition times.
+        w_te (float): Weight for echo time differences.
+        w_tr (float): Weight for repetition time differences.
+    
+    Returns:
+        torch.Tensor: (local_batch_size, global_batch_size) distance matrix.
+    """
+    te_diff = te[:, None] - all_te[None, :]  # Compute pairwise differences
+    tr_diff = tr[:, None] - all_tr[None, :]
+    
+    distances = torch.sqrt(te_diff**2 / w_te + tr_diff**2 / w_tr)  # Compute normalized Euclidean distance
+    return distances
+
+def mahalanobis_distance_batchwise(te, tr, all_te, all_tr, eps=1e-6):
+    """
+    Computes Mahalanobis distance between local batch and all gathered batches.
+    
+    Args:
+        te (torch.Tensor): (local_batch_size,) tensor of local echo times.
+        tr (torch.Tensor): (local_batch_size,) tensor of local repetition times.
+        all_te (torch.Tensor): (global_batch_size,) tensor of all gathered echo times.
+        all_tr (torch.Tensor): (global_batch_size,) tensor of all gathered repetition times.
+        eps (float): Small value for numerical stability.
+    
+    Returns:
+        torch.Tensor: (local_batch_size, global_batch_size) Mahalanobis distance matrix.
+    """
+    local_X = torch.stack([te, tr], dim=1)  # Shape (local_batch_size, 2)
+    global_X = torch.stack([all_te, all_tr], dim=1)  # Shape (global_batch_size, 2)
+
+    # Compute covariance matrix of the global batch
+    cov_matrix = torch.cov(global_X.T) + eps * torch.eye(2, device=global_X.device)  # Regularization
+    inv_cov = torch.linalg.inv(cov_matrix)
+
+    # Compute pairwise differences
+    diffs = local_X[:, None, :] - global_X[None, :, :]  # Shape (local_batch_size, global_batch_size, 2)
+
+    # Compute Mahalanobis distance
+    distances = torch.sqrt(torch.einsum('bij,jk,bik->bi', diffs, inv_cov, diffs))
+    
+    return distances

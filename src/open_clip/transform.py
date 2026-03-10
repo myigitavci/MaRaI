@@ -5,17 +5,22 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
-import torchvision.transforms.functional as F
+import torch.nn.functional as F
 from torchvision.transforms import Normalize, Compose, RandomResizedCrop, InterpolationMode, ToTensor, Resize, \
     CenterCrop, ColorJitter, Grayscale,RandomRotation, GaussianBlur, RandomHorizontalFlip, RandomAffine
+import numpy as np
+import scipy.ndimage
 
 from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
 from .utils import to_2tuple
 
+class VolumeNormalizationError(Exception):
+    """Exception raised when volume normalization fails and should be skipped."""
+    pass
 
 @dataclass
 class PreprocessCfg:
-    size: Union[int, Tuple[int, int]] = 224
+    size: Union[int, Tuple[int, int]] = 128
     mode: str = 'RGB'
     mean: Tuple[float, ...] = OPENAI_DATASET_MEAN
     std: Tuple[float, ...] = OPENAI_DATASET_STD
@@ -280,6 +285,7 @@ def image_transform(
         interpolation: Optional[str] = None,
         fill_color: int = 0,
         aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+        rgb: bool = False,
 ):
     mean = mean or OPENAI_DATASET_MEAN
     if not isinstance(mean, (list, tuple)):
@@ -302,106 +308,167 @@ def image_transform(
     else:
         aug_cfg = aug_cfg or AugmentationCfg()
 
-    normalize = Normalize(mean=mean, std=std)
-
-    if is_train:
-        aug_cfg_dict = {k: v for k, v in asdict(aug_cfg).items() if v is not None}
-        use_timm = aug_cfg_dict.pop('use_timm', False)
-        if use_timm:
-            from timm.data import create_transform  # timm can still be optional
-            if isinstance(image_size, (tuple, list)):
-                assert len(image_size) >= 2
-                input_size = (3,) + image_size[-2:]
+    if rgb:
+        normalize = Normalize(mean=mean, std=std)
+        if is_train:
+            aug_cfg_dict = {k: v for k, v in asdict(aug_cfg).items() if v is not None}
+            use_timm = aug_cfg_dict.pop('use_timm', False)
+            if use_timm:
+                from timm.data import create_transform
+                if isinstance(image_size, (tuple, list)):
+                    assert len(image_size) >= 2
+                    input_size = (3,) + image_size[-2:]
+                else:
+                    input_size = (3, image_size, image_size)
+                aug_cfg_dict.setdefault('color_jitter', None)
+                aug_cfg_dict.pop('color_jitter_prob', None)
+                aug_cfg_dict.pop('gray_scale_prob', None)
+                train_transform = create_transform(
+                    input_size=input_size,
+                    is_training=True,
+                    hflip=0.,
+                    mean=mean,
+                    std=std,
+                    re_mode='pixel',
+                    interpolation=interpolation,
+                    **aug_cfg_dict,
+                )
             else:
-                input_size = (3, image_size, image_size)
-
-            aug_cfg_dict.setdefault('color_jitter', None)  # disable by default
-            # drop extra non-timm items
-            aug_cfg_dict.pop('color_jitter_prob', None)
-            aug_cfg_dict.pop('gray_scale_prob', None)
-
-            train_transform = create_transform(
-                input_size=input_size,
-                is_training=True,
-                hflip=0.,
-                mean=mean,
-                std=std,
-                re_mode='pixel',
-                interpolation=interpolation,
-                **aug_cfg_dict,
-            )
+                train_transform = [
+                    RandomResizedCrop(
+                        image_size,
+                        scale=aug_cfg_dict.pop('scale'),
+                        interpolation=InterpolationMode.BICUBIC,
+                    ),
+                    _convert_to_rgb,
+                ]
+                train_transform.extend([RandomAffine(degrees=(-20, 20), 
+                                                     translate=(0.3, 0.3),
+                                                     scale=(0.8, 1.2))])
+                train_transform.extend([GaussianBlur(kernel_size=3)])
+                train_transform.extend([RandomHorizontalFlip()])
+                if aug_cfg.color_jitter_prob:
+                    assert aug_cfg.color_jitter is not None and len(aug_cfg.color_jitter) == 4
+                    train_transform.extend([
+                        color_jitter(*aug_cfg.color_jitter, p=aug_cfg.color_jitter_prob)
+                    ])
+                if aug_cfg.gray_scale_prob:
+                    train_transform.extend([
+                        gray_scale(aug_cfg.gray_scale_prob)
+                    ])
+                train_transform.extend([
+                    ToTensor(),
+                    normalize,
+                ])
+                train_transform = Compose(train_transform)
+                if aug_cfg_dict:
+                    warnings.warn(f'Unused augmentation cfg items, specify `use_timm` to use ({list(aug_cfg_dict.keys())}).')
+            return train_transform
         else:
-            train_transform = [
-                RandomResizedCrop(
-                    image_size,
-                    scale=aug_cfg_dict.pop('scale'),
-                    interpolation=InterpolationMode.BICUBIC,
-                ),
+            if resize_mode == 'longest':
+                transforms = [
+                    ResizeKeepRatio(image_size, interpolation=interpolation_mode, longest=1),
+                    CenterCropOrPad(image_size, fill=fill_color)
+                ]
+            elif resize_mode == 'squash':
+                if isinstance(image_size, int):
+                    image_size = (image_size, image_size)
+                transforms = [
+                    Resize(image_size, interpolation=interpolation_mode),
+                ]
+            else:
+                assert resize_mode == 'shortest'
+                if not isinstance(image_size, (tuple, list)):
+                    image_size = (image_size, image_size)
+                if image_size[0] == image_size[1]:
+                    transforms = [
+                        Resize(image_size[0], interpolation=interpolation_mode)
+                    ]
+                else:
+                    transforms = [ResizeKeepRatio(image_size)]
+                transforms += [CenterCrop(image_size)]
+            transforms.extend([
                 _convert_to_rgb,
-                
-            ]
-            train_transform.extend([RandomAffine(degrees=(-20, 20), 
-                                                 translate=(0.3, 0.3),  # Small translation (2% of image size)
-                                                 scale=(0.8, 1.2))])
-            train_transform.extend([GaussianBlur(kernel_size=3)])
-            train_transform.extend([RandomHorizontalFlip()])
-
-            if aug_cfg.color_jitter_prob:
-                assert aug_cfg.color_jitter is not None and len(aug_cfg.color_jitter) == 4
-                train_transform.extend([
-                    color_jitter(*aug_cfg.color_jitter, p=aug_cfg.color_jitter_prob)
-                ])
-            if aug_cfg.gray_scale_prob:
-                train_transform.extend([
-                    gray_scale(aug_cfg.gray_scale_prob)
-                ])
-            train_transform.extend([
                 ToTensor(),
                 normalize,
             ])
-            train_transform = Compose(train_transform)
-            if aug_cfg_dict:
-                warnings.warn(f'Unused augmentation cfg items, specify `use_timm` to use ({list(aug_cfg_dict.keys())}).')
-        return train_transform
+            return Compose(transforms)
     else:
-        if resize_mode == 'longest':
-            transforms = [
-                ResizeKeepRatio(image_size, interpolation=interpolation_mode, longest=1),
-                CenterCropOrPad(image_size, fill=fill_color)
+        # Grayscale: do not convert to RGB, use classic normalization (scale to [0,1])
+        # def classic_normalize(img):
+        #     # img is a torch tensor
+        #     if isinstance(img, torch.Tensor):
+        #         min_val = img.min()
+        #         max_val = img.max()
+        #         if max_val > min_val:
+        #             return (img - min_val) / (max_val - min_val)
+        #         else:
+        #             return img - min_val  # fallback if all values are the same
+        #     else:
+        #         return img
+        # def classic_normalize(img):
+        #     # img is a torch tensor
+        #     if isinstance(img, torch.Tensor):
+        #         print(f"[Norm98] min: {img.min():.6f}, max: {img.max():.6f}, mean: {img.mean():.6f}, std: {img.std():.6f}")
+        #         return img/255  # fallback if all values are the same
+            
+        #     else:
+        #         return img/255
+        if is_train:
+            train_transform = [
+                RandomResizedCrop(image_size, interpolation=InterpolationMode.BICUBIC),
+                # No _convert_to_rgb
+                RandomAffine(degrees=(-20, 20), translate=(0.3, 0.3), scale=(0.8, 1.2)),
+                GaussianBlur(kernel_size=3),
+                RandomHorizontalFlip(),
+                ToTensor(),
+                # classic_normalize,
             ]
-        elif resize_mode == 'squash':
-            if isinstance(image_size, int):
-                image_size = (image_size, image_size)
-            transforms = [
-                Resize(image_size, interpolation=interpolation_mode),
-            ]
+            return Compose(train_transform)
         else:
-            assert resize_mode == 'shortest'
-            if not isinstance(image_size, (tuple, list)):
-                image_size = (image_size, image_size)
-            if image_size[0] == image_size[1]:
-                # simple case, use torchvision built-in Resize w/ shortest edge mode (scalar size arg)
+            if resize_mode == 'longest':
                 transforms = [
-                    Resize(image_size[0], interpolation=interpolation_mode)
+                    ResizeKeepRatio(image_size, interpolation=interpolation_mode, longest=1),
+                    CenterCropOrPad(image_size, fill=fill_color)
+                ]
+            elif resize_mode == 'squash':
+                if isinstance(image_size, int):
+                    image_size = (image_size, image_size)
+                transforms = [
+                    Resize(image_size, interpolation=interpolation_mode),
                 ]
             else:
-                # resize shortest edge to matching target dim for non-square target
-                transforms = [ResizeKeepRatio(image_size)]
-            transforms += [CenterCrop(image_size)]
-
-        transforms.extend([
-            _convert_to_rgb,
-            ToTensor(),
-            normalize,
-        ])
-        return Compose(transforms)
+                assert resize_mode == 'shortest'
+                if not isinstance(image_size, (tuple, list)):
+                    image_size = (image_size, image_size)
+                if image_size[0] == image_size[1]:
+                    transforms = [
+                        Resize(image_size[0], interpolation=interpolation_mode)
+                    ]
+                else:
+                    transforms = [ResizeKeepRatio(image_size)]
+                transforms += [CenterCrop(image_size)]
+            transforms.extend([
+                # No _convert_to_rgb
+                ToTensor(),
+                # classic_normalize,
+            ])
+            return Compose(transforms)
 
 
 def image_transform_v2(
         cfg: PreprocessCfg,
         is_train: bool,
         aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+        vis_3d: bool = False,
+        rgb: bool = False,
 ):
+    """
+    Unified transform function for 2D and 3D. If vis_3d is True, applies 3D transforms, else 2D.
+    """
+    if vis_3d:
+        return volume_transform_v2(cfg, is_train, aug_cfg)
+    # --- original 2D logic below ---
     return image_transform(
         image_size=cfg.size,
         is_train=is_train,
@@ -411,4 +478,400 @@ def image_transform_v2(
         resize_mode=cfg.resize_mode,
         fill_color=cfg.fill_color,
         aug_cfg=aug_cfg,
+        rgb=rgb,  # use RGB images instead of grayscale
+    )
+
+
+class Volume3DTransform:
+    """
+    Apply a sequence of 3D transforms to a 3D volume (C, D, H, W) or (D, H, W).
+    Supports fixed cropping (for registered images), resizing, random affine, and normalization.
+    Uses PyTorch operations for better performance.
+    """
+    def __init__(self, image_size=128, is_train=True, mean=0.0, std=1.0, p_flip=0.5,
+                 affine_degrees=15, affine_translate=0.1, affine_scale=(0.9, 1.1),
+                 crop_coords=None, skull: bool = False, save_examples=False,
+                 example_dir='crop_examples', use_default_crop: bool = True):
+        """
+        Args:
+            image_size: Target size after resizing (default: 128) or (D, H, W) tuple.
+            is_train: Training mode (enables augmentation)
+            crop_coords: Optional explicit crop coordinates dict with keys
+                         d_min, d_max, h_min, h_max, w_min, w_max. If None and
+                         `use_default_crop` is True, coordinates are chosen
+                         based on the `skull` flag. If None and
+                         `use_default_crop` is False, no fixed crop is applied.
+            skull: If True, use crop region that keeps the skull; otherwise,
+                   use crop region without skull.
+            save_examples: If True, saves example volumes after cropping (for verification)
+            example_dir: Directory to save example volumes
+        """
+        self.image_size = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size, image_size)
+        self.is_train = is_train
+        self.mean = mean
+        self.std = std
+        self.p_flip = p_flip
+        self.affine_degrees = affine_degrees
+        self.affine_translate = affine_translate
+        self.affine_scale = affine_scale
+
+        # Decide crop coordinates
+        if crop_coords is not None:
+            # Explicit crop coords override everything
+            self.crop_coords = crop_coords
+        elif use_default_crop:
+            if skull:
+                print("Using skull crop coordinates")
+                # with skull
+                self.crop_coords = {
+                    'd_min': 12, 'd_max': 180,
+                    'h_min': 20, 'h_max': 227,
+                    'w_min': 82, 'w_max': 245,
+                }
+            else:
+                # no skull
+                self.crop_coords = {
+                    'd_min': 22, 'd_max': 170,
+                    'h_min': 28, 'h_max': 214,
+                    'w_min': 90, 'w_max': 237,
+                }
+        else:
+            # No fixed crop
+            self.crop_coords = None
+
+        self.save_examples = save_examples
+        self.example_dir = example_dir
+        self._examples_saved = 0
+        self._max_examples = 5  # Save only first 5 examples
+
+    def crop_fixed(self, volume):
+        """
+        Apply fixed crop coordinates (for registered images).
+
+        Args:
+            volume: (C, D, H, W) or (D, H, W) torch tensor
+
+        Returns:
+            Cropped volume torch tensor
+        """
+        crop_coords = self.crop_coords
+        # If no crop coords are set, return volume as-is
+        if crop_coords is None:
+            return volume
+
+        is_4d = len(volume.shape) == 4
+        
+        d_min = crop_coords['d_min']
+        d_max = crop_coords['d_max']
+        h_min = crop_coords['h_min']
+        h_max = crop_coords['h_max']
+        w_min = crop_coords['w_min']
+        w_max = crop_coords['w_max']
+        
+        # Crop
+        if is_4d:
+            cropped = volume[:, d_min:d_max, h_min:h_max, w_min:w_max]
+        else:
+            cropped = volume[d_min:d_max, h_min:h_max, w_min:w_max]
+        
+        return cropped
+    
+    def save_crop_example(self, original_volume, cropped_volume, index):
+        """
+        Save example volumes before and after cropping for verification.
+        """
+        import os
+        import nibabel as nib
+        
+        os.makedirs(self.example_dir, exist_ok=True)
+        
+        # Helper to convert to numpy 3D
+        def to_numpy_3d(vol):
+            if isinstance(vol, torch.Tensor):
+                vol = vol.detach().cpu().numpy()
+            if vol.ndim == 4:
+                return vol[0] if vol.shape[0] == 1 else vol.mean(axis=0)
+            return vol
+        
+        orig_3d = to_numpy_3d(original_volume)
+        crop_3d = to_numpy_3d(cropped_volume)
+        
+        # Save as NIfTI
+        orig_nii = nib.Nifti1Image(orig_3d, affine=np.eye(4))
+        crop_nii = nib.Nifti1Image(crop_3d, affine=np.eye(4))
+        
+        orig_path = os.path.join(self.example_dir, f'example_{index:03d}_original.nii.gz')
+        crop_path = os.path.join(self.example_dir, f'example_{index:03d}_cropped.nii.gz')
+        
+        nib.save(orig_nii, orig_path)
+        nib.save(crop_nii, crop_path)
+        
+        print(f"💾 Saved crop example {index}:")
+        print(f"   Original: {orig_3d.shape} → {orig_path}")
+        print(f"   Cropped:  {crop_3d.shape} → {crop_path}")
+    
+    def resize(self, volume):
+        # volume: (C, D, H, W) or (D, H, W) torch tensor
+        if not isinstance(volume, torch.Tensor):
+             volume = torch.from_numpy(volume).float()
+
+        # Check for NaN in input
+        if torch.isnan(volume).any():
+            raise ValueError("Input volume contains NaN values")
+            
+        orig_dim = volume.dim()
+        if orig_dim == 3:
+            # Add channel and batch dimension: (1, 1, D, H, W) for interpolate
+            volume = volume.unsqueeze(0).unsqueeze(0)
+        elif orig_dim == 4:
+            # Add batch dimension: (1, C, D, H, W)
+            volume = volume.unsqueeze(0)
+        else:
+             raise ValueError("Volume must be 3D or 4D")
+
+        # PyTorch interpolate expects (Batch, Channel, D, H, W)
+        resized = F.interpolate(volume, size=self.image_size, mode='trilinear', align_corners=False)
+
+        # Remove extra dimensions
+        if orig_dim == 3:
+            resized = resized.squeeze(0).squeeze(0)
+        elif orig_dim == 4:
+            resized = resized.squeeze(0)
+            
+        # Check for NaN after resize
+        if torch.isnan(resized).any():
+            raise ValueError("NaN detected after resize operation")
+            
+        return resized
+
+    def random_horizontal_flip(self, volume):
+        # Flip along W axis (last dim)
+        if random.random() < self.p_flip:
+            # torch.flip is widely supported
+            return torch.flip(volume, dims=[-1])
+        return volume
+
+    def random_affine(self, volume):
+        # Only apply for training
+        if not self.is_train:
+            return volume
+            
+        # Check for NaN before affine
+        if torch.isnan(volume).any():
+            raise ValueError("NaN detected before affine transform")
+
+        # Create affine matrix manually
+        angle_x = random.uniform(-self.affine_degrees, self.affine_degrees)
+        angle_y = random.uniform(-self.affine_degrees, self.affine_degrees)
+        angle_z = random.uniform(-self.affine_degrees, self.affine_degrees)
+        
+        ax, ay, az = np.deg2rad([angle_x, angle_y, angle_z])
+
+        # Rotation matrices
+        Rx = torch.tensor([[1, 0, 0],
+                           [0, np.cos(ax), -np.sin(ax)],
+                           [0, np.sin(ax), np.cos(ax)]], dtype=torch.float32)
+        Ry = torch.tensor([[np.cos(ay), 0, np.sin(ay)],
+                           [0, 1, 0],
+                           [-np.sin(ay), 0, np.cos(ay)]], dtype=torch.float32)
+        Rz = torch.tensor([[np.cos(az), -np.sin(az), 0],
+                           [np.sin(az), np.cos(az), 0],
+                           [0, 0, 1]], dtype=torch.float32)
+
+        # Combined rotation: Rz @ Ry @ Rx
+        R = Rz @ Ry @ Rx
+
+        # Scale
+        scale = random.uniform(self.affine_scale[0], self.affine_scale[1])
+        S = torch.diag(torch.tensor([scale, scale, scale], dtype=torch.float32))
+
+        # Combined affine (rotation + scale)
+        # Note: In grid_sample, the transformation maps output coordinates to input coordinates.
+        # So we typically use the inverse. However, standard affine matrices are usually T @ x.
+        # grid_sample expects a theta matrix of shape (N, 3, 4).
+        # The coordinate system is [-1, 1].
+        # Let's adjust. If we want to rotate by R and scale by S, the coordinate mapping from output to input is inv(S) @ inv(R).
+        # But for small random perturbations, R @ S vs inv(R) @ inv(S) just changes the direction of random transform,
+        # which is symmetric for uniform distributions centered at 0/1. So we can use the matrix directly or its inverse.
+        # Let's use the forward matrix construction for simplicity, accepting it might be the inverse transform effectively.
+        
+        M_3x3 = R @ S
+        
+        # Translation
+        # grid_sample shift is in [-1, 1] range.
+        tx = random.uniform(-self.affine_translate, self.affine_translate)
+        ty = random.uniform(-self.affine_translate, self.affine_translate)
+        tz = random.uniform(-self.affine_translate, self.affine_translate)
+        
+        # Construct 3x4 matrix
+        # theta = [[m00, m01, m02, tx], [m10, m11, m12, ty], [m20, m21, m22, tz]]
+        M_3x4 = torch.cat([M_3x3, torch.tensor([[tx], [ty], [tz]], dtype=torch.float32)], dim=1)
+        
+        # F.affine_grid expects batch (N, 3, 4)
+        theta = M_3x4.unsqueeze(0) # (1, 3, 4)
+        
+        # Prepare volume
+        orig_dim = volume.dim()
+        if orig_dim == 3:
+             # Add batch and channel: (1, 1, D, H, W)
+             x = volume.unsqueeze(0).unsqueeze(0)
+        elif orig_dim == 4:
+             # Add batch: (1, C, D, H, W)
+             x = volume.unsqueeze(0)
+        else:
+             raise ValueError("Volume must be 3D or 4D")
+
+        # Grid sample
+        grid = F.affine_grid(theta, x.size(), align_corners=False)
+        out = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        
+        # Squeeze back
+        if orig_dim == 3:
+            out = out.squeeze(0).squeeze(0)
+        elif orig_dim == 4:
+            out = out.squeeze(0)
+            
+        # Check for NaN after affine
+        if torch.isnan(out).any():
+            raise ValueError("NaN detected after affine transform")
+            
+        return out
+
+    def normalize(self, volume):
+        # Check for NaN before normalization
+        if torch.isnan(volume).any():
+            raise VolumeNormalizationError(
+                f"NaN detected before normalization. Volume shape: {volume.shape}"
+            )
+        
+        # Use torch.quantile (percentile)
+        # Note: quantile works on float tensors
+        if not volume.is_floating_point():
+            volume = volume.float()
+
+        q2 = torch.quantile(volume, 0.0001)
+        q98 = torch.quantile(volume, 0.999)
+
+        # Handle degenerate cases
+        if q98 == 0 or torch.isnan(q98):
+             raise VolumeNormalizationError(
+                f"98th percentile is zero or NaN — cannot normalize."
+            )
+
+        # Clip (in-place)
+        volume.clamp_(min=q2, max=q98)
+
+        # Normalize (in-place)
+        # volume = (volume - q2) / (q98 - q2)
+        volume.sub_(q2).div_(q98 - q2)
+        
+        # Check for NaN after normalization
+        if torch.isnan(volume).any():
+            raise VolumeNormalizationError(
+                f"NaN detected after normalization."
+            )
+        
+        return volume
+
+    def __call__(self, volume):
+        # volume: (C, D, H, W) or (D, H, W)
+        # Ensure input is Tensor
+        if isinstance(volume, np.ndarray):
+            volume = torch.from_numpy(volume).float()
+        elif not isinstance(volume, torch.Tensor):
+            # Try to convert whatever it is
+            volume = torch.as_tensor(volume).float()
+            
+        # Check for NaN in input explicitly at the start
+        if torch.isnan(volume).any():
+             raise ValueError("Input volume contains NaN values")
+            
+        # Store original for example saving
+        original_volume = volume.clone() if self.save_examples and self._examples_saved < self._max_examples else None
+        
+        # Step 1: Apply fixed crop if coordinates provided (for registered images)
+        v = self.crop_fixed(volume)
+        
+        # Save crop example if requested
+        if self.save_examples and self._examples_saved < self._max_examples and self.crop_coords is not None:
+            self.save_crop_example(original_volume, v, self._examples_saved)
+            self._examples_saved += 1
+        
+        # Step 2: Resize
+        v = self.resize(v)
+        # Step 3: Normalize    
+        v = self.normalize(v)
+        # Step 4: Augmentation (if training)
+        if self.is_train:
+            v = self.random_affine(v)
+
+
+        
+        # Ensure single channel output
+        # If shape is (C, D, H, W) and C=3, take first channel as before?
+        # The previous code for D=3 dims did: if v.shape[0] == 3: v = v[0:1]
+        # BUT wait, the previous code checked v.shape[0] == 3. For (D, H, W) that refers to D=3.
+        # But if input is (C, D, H, W), then shape[0] is C.
+        # Let's be careful. If the input was (3, D, H, W), we probably want (1, D, H, W).
+        if v.dim() == 4 and v.shape[0] == 3:
+            v = v[0:1] # Keep 1st channel, shape (1, D, H, W)
+            
+        # Final NaN check
+        if torch.isnan(v).any():
+            raise ValueError("NaN detected in final transform output")
+            
+        # Ensure correct shape for 3D ViT: should be (C, D, H, W) where C=1
+        if v.dim() == 3:
+            v = v.unsqueeze(0) # (D, H, W) -> (1, D, H, W)
+            
+        if v.dim() != 4:
+            raise ValueError(f"Expected 4D output (C, D, H, W), got {v.shape}")
+        if v.shape[0] != 1:
+            raise ValueError(f"Expected single channel output, got {v.shape[0]} channels")
+            
+        return v
+
+
+def volume_transform_v2(
+        cfg: PreprocessCfg,
+        is_train: bool,
+        aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+):
+    # Accepts the same config as image_transform_v2, but returns a Volume3DTransform
+    # Only uses relevant fields for 3D
+    mean = cfg.mean if hasattr(cfg, 'mean') else 0.0
+    std = cfg.std if hasattr(cfg, 'std') else 1.0
+    image_size = cfg.size if hasattr(cfg, 'size') else 128
+    # Augmentation config
+    p_flip = 0.5
+    affine_degrees = 15
+    affine_translate = 0.1
+    affine_scale = (0.9, 1.1)
+    crop_coords = None
+    skull = False
+    use_default_crop = True
+    if aug_cfg is not None:
+        if isinstance(aug_cfg, dict):
+            p_flip = aug_cfg.get('p_flip', p_flip)
+            affine_degrees = aug_cfg.get('affine_degrees', affine_degrees)
+            affine_translate = aug_cfg.get('affine_translate', affine_translate)
+            affine_scale = aug_cfg.get('affine_scale', affine_scale)
+            crop_coords = aug_cfg.get('crop_coords', crop_coords)
+            skull = aug_cfg.get('skull', skull)
+            use_default_crop = aug_cfg.get('use_default_crop', use_default_crop)
+        elif isinstance(aug_cfg, AugmentationCfg):
+            # You can extend this if you add 3D-specific fields to AugmentationCfg
+            pass
+    return Volume3DTransform(
+        image_size=image_size,
+        is_train=is_train,
+        mean=mean,
+        std=std,
+        p_flip=p_flip,
+        affine_degrees=affine_degrees,
+        affine_translate=affine_translate,
+        affine_scale=affine_scale,
+        crop_coords=crop_coords,
+        skull=skull,
+        use_default_crop=use_default_crop,
     )

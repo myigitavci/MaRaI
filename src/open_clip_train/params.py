@@ -61,7 +61,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "--dataset-type",
-        choices=["webdataset", "csv", "synthetic", "auto","csv-unique-sampler"],
+        choices=["webdataset", "csv", "synthetic", "auto","csv-unique-sampler","csv-3d"],
         default="auto",
         help="Which type of dataset to process."
     )
@@ -82,6 +82,30 @@ def parse_args(args):
         action="store_false",
         default=True,
         help="Make logit scale not trainable.",
+    )
+    parser.add_argument(
+        "--vis_3d",
+        action="store_true",
+        default=False,
+        help="Train with 3D data.",
+    )
+    parser.add_argument(
+        "--skull",
+        action="store_true",
+        default=False,
+        help="Use 3D crop that keeps skull; also sets text context length to 120.",
+    )
+    parser.add_argument(
+        "--no_fixed_crop",
+        action="store_true",
+        default=False,
+        help="Disable default fixed 3D crop (use full volume).",
+    )
+    parser.add_argument(
+        "--textcontextlength",
+        type=int,
+        default=98,
+        help="Set text context length.",
     )
     parser.add_argument(
         "--freezelast",
@@ -108,10 +132,38 @@ def parse_args(args):
         help="Calculate metrics on also unique pairs"
     )
     parser.add_argument(
+        "--quality-control-heatmap",
+        default=False,
+        action="store_true",
+        help="Calculate quality control heatmap on the validation set."
+    )
+    parser.add_argument(
+        "--quality-control-heatmap-error-types",
+        type=str,
+        default=['field_corruption', 'missing_fields', 'partial_mismatch'],
+        help="Error types to include in the quality control heatmap."
+    )
+    parser.add_argument(
+        "--rgb",
+        default=False,
+        action="store_true",
+        help="Use RGB images instead of grayscale.")
+    parser.add_argument(
+        "--save-embeddings",
+        default=False,
+        action="store_true",
+        help="Save embeddings to disk for later use.")    
+    parser.add_argument(
         "--linear",
         default=False,
         action="store_true",
         help="Evaluate linear probe on the validation set."
+    )
+    parser.add_argument(
+        "--linear-sequence",
+        default=False,
+        action="store_true",
+        help="Evaluate linear probe on the validation set for 3D sequences."
     )
     parser.add_argument(
         "--test",
@@ -372,7 +424,7 @@ def parse_args(args):
     )
     parser.add_argument(
         '--force-image-size', type=int, nargs='+', default=None,
-        help='Override default image size'
+        help='Override default image size (int or list of ints)'
     )
     parser.add_argument(
         "--force-quick-gelu",

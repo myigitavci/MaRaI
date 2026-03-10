@@ -20,7 +20,7 @@ import torch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 _nltk_init = False
 
-DEFAULT_CONTEXT_LENGTH = 98  # default context length for OpenAI CLIP
+DEFAULT_CONTEXT_LENGTH = 77  # default context length for OpenAI CLIP
 
 
 @lru_cache()

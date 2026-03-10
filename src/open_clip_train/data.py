@@ -22,7 +22,10 @@ from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableD
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
-
+import nibabel as nib
+import csv
+import threading
+from open_clip.transform import VolumeNormalizationError
 try:
     import horovod.torch as hvd
 except ImportError:
@@ -502,13 +505,45 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
 
     return DataInfo(dataloader, sampler)
 
+def get_csv_dataset_3d(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
+    input_filename = args.train_data if is_train else args.val_data
+    assert input_filename
+    dataset = CsvDataset3D(
+        input_filename,
+        preprocess_fn,
+        img_key=args.csv_img_key,
+        caption_key=args.csv_caption_key,
+        sep=args.csv_separator,
+        tokenizer=tokenizer,
+        distance=args.distance,
+    )
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    shuffle = is_train and sampler is None
+
+    # Optimize DataLoader for 3D volumes: use persistent workers and prefetching
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        pin_memory=False,
+        sampler=sampler,
+        drop_last=is_train,
+        # persistent_workers=args.workers > 0,  # Keep workers alive between epochs
+        # prefetch_factor=2 if args.workers > 0 else 2,  # Prefetch batches for better throughput
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
 
 class SyntheticDataset(Dataset):
 
     def __init__(
             self,
             transform=None,
-            image_size=(224, 224),
+            image_size=(128, 128, 128),
             caption="Dummy caption",
             dataset_size=100,
             tokenizer=None,
@@ -558,6 +593,8 @@ def get_dataset_fn(data_path, dataset_type):
         return get_wds_dataset
     elif dataset_type == "csv":
         return get_csv_dataset
+    elif dataset_type == "csv-3d":
+        return get_csv_dataset_3d
     elif dataset_type == "csv-unique-sampler":
         return get_csv_dataset_unique_sampler
     elif dataset_type == "synthetic":
@@ -885,8 +922,167 @@ def get_tabular_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
         pin_memory=True,
         sampler=sampler,
         drop_last=is_train,
+        persistent_workers=(args.workers > 0),
+        prefetch_factor=2 if args.workers > 0 else None,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
 
     return DataInfo(dataloader, sampler)
+
+class CsvDataset3D:
+    _bad_volume_log = "/home/mav24/Projects/AMA-CLIP/logs/vitb-registered-with-planes-g1-lr-1e4-b-150-wd-02-warmup-2000-epoch-100-augnew2-text-dropout-tokenlength-98-et-20-rt-20-3D-anat-oasisgpu1clip001999-128/bad_volumes.csv"
+    _log_lock = threading.Lock()
+    # Cache for loaded volumes (per-worker, since each DataLoader worker is a separate process)
+    # Using instance variable instead of class variable for per-worker caching
+
+    @staticmethod
+    def log_bad_volume(filepath, reason):
+        # with CsvDataset3D._log_lock:
+        #     with open(CsvDataset3D._bad_volume_log, "a") as f:
+        #         writer = csv.writer(f)
+        #         writer.writerow([filepath, reason])
+        pass
+
+    def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t", tokenizer=None, distance=False):
+        logging.debug(f'Loading csv data from {input_filename}.')
+        df = pd.read_csv(input_filename, sep=sep)
+        self.images = df[img_key].tolist()
+        self.captions = df[caption_key].tolist()
+        self.labels = df['label'].tolist() if 'label' in df.columns else None
+        self.transforms = transforms
+        self.tokenize = tokenizer
+        self.distance = distance
+        # Extract 3D image ID (removing slice index if present)
+        self.image_groups = defaultdict(list)
+        for idx, filepath in enumerate(self.images):
+            image_id = filepath  # For 3D, each file is a volume
+            self.image_groups[image_id].append(idx)
+        # Get worker info for per-worker caching
+        self.worker_id = None
+        try:
+            worker_info = get_worker_info()
+            if worker_info is not None:
+                self.worker_id = worker_info.id
+        except:
+            pass
+        # Per-worker cache (each DataLoader worker process has its own instance)
+        # Disabled cache temporarily to debug segfaults - can re-enable after fixing
+        self._volume_cache = {}
+        self._max_cache_size = 0  # Disabled cache to avoid potential segfault sources
+        logging.info(f"Loaded {len(self.images)} 3D NIfTI volumes across {len(self.image_groups)} unique 3D images.")
+
+    def extract_times(self, caption):
+        matches = re.findall(r'\(([^()]*)\)', caption)
+        if matches:
+            values = re.findall(r'\d+\.\d+|\d+', matches[-1])
+            if len(values) >= 2:
+                echo_time = float(values[0])
+                repetition_time = float(values[1])
+                return echo_time, repetition_time
+        return None, None
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        # Load 3D NIfTI volume with caching and memory mapping for performance
+        nifti_path = str(self.images[idx])
+        
+        # Try to get from cache first (per-worker instance cache)
+        cache_key = nifti_path
+        volume = None
+        
+        # Check cache (per-worker, no lock needed since each worker is a separate process)
+        # Skip cache if disabled (max_cache_size == 0)
+        if self._max_cache_size > 0 and cache_key in self._volume_cache:
+            volume = self._volume_cache[cache_key].copy()
+        
+        if volume is None:
+            try:
+                # Load without memory mapping to avoid segfaults in multi-process DataLoader
+                # Memory mapping can cause issues when accessed from multiple worker processes
+                nifti_img = nib.load(nifti_path, mmap=False)
+                volume = nifti_img.get_fdata()  # shape: (D, H, W) or (H, W, D)
+                
+                # Optionally add channel dimension if needed (C, D, H, W) or (C, H, W, D)
+                if volume.ndim == 3:
+                    volume = np.expand_dims(volume, axis=0)  # (1, D, H, W) or (1, H, W, D)
+                
+                # Convert to float32 and ensure it's a contiguous array
+                volume = np.ascontiguousarray(volume.astype(np.float32))
+                
+                # Explicitly close the file handle to free resources
+                del nifti_img
+                
+                # Cache the volume (limit cache size, per-worker) - only if caching enabled
+                if self._max_cache_size > 0:
+                    if len(self._volume_cache) >= self._max_cache_size:
+                        # Remove oldest entry (simple FIFO)
+                        oldest_key = next(iter(self._volume_cache))
+                        del self._volume_cache[oldest_key]
+                    self._volume_cache[cache_key] = volume.copy()
+            except Exception as e:
+                # If loading fails, log and create dummy volume to keep ranks in sync
+                CsvDataset3D.log_bad_volume(nifti_path, f"LoadError: {str(e)}")
+                target_size = getattr(self.transforms, 'image_size', (128, 128, 128)) if self.transforms else (128, 128, 128)
+                if isinstance(target_size, (list, tuple)) and len(target_size) == 3:
+                    d, h, w = target_size
+                else:
+                    d = h = w = int(target_size)
+                volume = np.zeros((1, d, h, w), dtype=np.float32)
+        
+        # Validate volume before transforms
+        if np.isnan(volume).any():
+            CsvDataset3D.log_bad_volume(nifti_path, "NaN in volume")
+            # Create dummy volume to keep ranks in sync
+            target_size = getattr(self.transforms, 'image_size', (128, 128, 128)) if self.transforms else (128, 128, 128)
+            if isinstance(target_size, (list, tuple)) and len(target_size) == 3:
+                d, h, w = target_size
+            else:
+                d = h = w = int(target_size)
+            volume = np.zeros((1, d, h, w), dtype=np.float32)
+        
+        q = np.percentile(volume, 98)
+        if q == 0:
+            CsvDataset3D.log_bad_volume(nifti_path, "98th percentile is zero")
+            # Create dummy volume to keep ranks in sync
+            target_size = getattr(self.transforms, 'image_size', (128, 128, 128)) if self.transforms else (128, 128, 128)
+            if isinstance(target_size, (list, tuple)) and len(target_size) == 3:
+                d, h, w = target_size
+            else:
+                d = h = w = int(target_size)
+            volume = np.zeros((1, d, h, w), dtype=np.float32)
+        
+        # Apply transforms (should handle 3D volumes)
+        # Note: 98th percentile check is also done in the transform (normalize)
+        # We can convert to tensor here immediately to save time in transform
+        if isinstance(volume, np.ndarray):
+            volume = torch.from_numpy(volume).float()
+        
+        # Apply transforms (should handle 3D volumes)
+        if self.transforms:
+            try:
+                # volume is now a Tensor. The new transform expects Tensor.
+                volume = self.transforms(volume)
+            except (VolumeNormalizationError, ValueError, Exception) as e:
+                # Log and substitute a dummy zero volume to keep DDP ranks in sync
+                CsvDataset3D.log_bad_volume(nifti_path, f"TransformError: {str(e)}")
+                # Determine target size from transform if available
+                target_size = getattr(self.transforms, 'image_size', (128, 128, 128))
+                if isinstance(target_size, (list, tuple)) and len(target_size) == 3:
+                    d, h, w = target_size
+                else:
+                    d = h = w = int(target_size)
+                volume = torch.zeros((1, d, h, w), dtype=torch.float32)
+        
+        # Ensure volume is a torch tensor
+        if not isinstance(volume, torch.Tensor):
+            volume = torch.from_numpy(volume).float()
+        
+        texts = self.tokenize([str(self.captions[idx])])[0]
+        labels = self.labels[idx] if self.labels is not None else None
+        if self.distance:
+            echo_time, repetition_time = self.extract_times(self.captions[idx])
+            return volume, texts, labels, echo_time, repetition_time
+        return volume, texts, labels

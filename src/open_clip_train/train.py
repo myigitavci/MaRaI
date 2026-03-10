@@ -8,7 +8,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
-
+from collections import defaultdict, Counter
+import gc
 try:
     import wandb
 except ImportError:
@@ -16,12 +17,12 @@ except ImportError:
 
 from open_clip import get_input_dtype, CLIP, CustomTextCLIP
 from open_clip.loss import multi_positive_cross_entropy_loss
+from open_clip.transform import VolumeNormalizationError
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
 from transformers import AutoTokenizer
 from PIL import Image
-from collections import defaultdict, Counter
 
 # Load your tokenizer (replace 'your-model-name' with the actual model name)
 
@@ -92,181 +93,206 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     losses_m = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
+    skipped_volumes = 0
     end = time.time()
-    for i, batch in enumerate(dataloader):
-        i_accum = i // args.accum_freq
-        step = num_batches_per_epoch * epoch + i_accum
+    i = 0
+    dataloader_iter = iter(dataloader)
+    while True:
+        try:
+            batch = next(dataloader_iter)
+        except StopIteration:
+            break
+        except VolumeNormalizationError as e:
+            skipped_volumes += 1
+            if is_master(args) and skipped_volumes % 10 == 0:
+                logging.warning(f"Skipped {skipped_volumes} volumes due to normalization errors. Latest: {str(e)}")
+            continue
+        
+        try:
+            i_accum = i // args.accum_freq
+            step = num_batches_per_epoch * epoch + i_accum
 
-        if not args.skip_scheduler:
-            scheduler(step)
-        if args.distance:
-            images, texts, labels,echotime,repetitiontime = batch
-            echotime = echotime.to(device=device, non_blocking=True)
-            repetitiontime = repetitiontime.to(device=device, non_blocking=True)
-        else:   
-            images, texts, labels = batch
-        images = images.to(device=device, dtype=input_dtype, non_blocking=True)
-        texts = texts.to(device=device, non_blocking=True)
-        labels = labels.to(device=device, non_blocking=True)
-        data_time_m.update(time.time() - end)
-        optimizer.zero_grad()
+            if not args.skip_scheduler:
+                scheduler(step)
+            if args.distance:
+                images, texts, labels,echotime,repetitiontime = batch
+                echotime = echotime.to(device=device, non_blocking=True)
+                repetitiontime = repetitiontime.to(device=device, non_blocking=True)
+            else:   
+                images, texts, labels = batch
+            images = images.to(device=device, dtype=input_dtype, non_blocking=True)
 
-        if args.accum_freq == 1:
-            with autocast():
-                model_out = model(images, texts)
-                logit_scale = model_out["logit_scale"]
-                if args.distill:
-                    with torch.no_grad():
-                        dist_model_out = dist_model(images, texts)
-                    model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                #logging.info(f'Calculating loss for epoch {epoch} and batch {i}.')    
-                if args.multipositiveloss and args.distance is False:
-                    losses = loss(**model_out, tokenized_texts=labels,delta=args.delta,output_dict=True)
-                elif args.multipositiveloss and args.distance is True:
-                    losses = loss(**model_out, tokenized_texts=labels,delta=args.delta,echotime=echotime,repetitiontime=repetitiontime,output_dict=True)
-                else:
-                    losses = loss(**model_out, output_dict=True)
-
-                total_loss = sum(losses.values())
-                losses["loss"] = total_loss
-
-            backward(total_loss, scaler)
-        else:
-            # First, cache the features without any gradient tracking.
-            with torch.no_grad():
-                with autocast():
-                    model_out = model(images, texts)
-
-                    for f in ("logit_scale", "logit_bias"):
-                        model_out.pop(f, None)
-
-                    for key, val in model_out.items():
-                        if key in accum_features:
-                            accum_features[key].append(val)
-                        else:
-                            accum_features[key] = [val]
-
-                accum_images.append(images)
-                accum_texts.append(texts)
-
-            # If (i + 1) % accum_freq is not zero, move on to the next batch.
-            if ((i + 1) % args.accum_freq) > 0:
-                # FIXME this makes data time logging unreliable when accumulating
-                continue
-
-            # Now, ready to take gradients for the last accum_freq batches.
-            # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
-            # Call backwards each time, but only step optimizer at the end.
+            texts = texts.to(device=device, non_blocking=True)
+            labels = labels.to(device=device, non_blocking=True)
+            data_time_m.update(time.time() - end)
             optimizer.zero_grad()
-            for j in range(args.accum_freq):
-                images = accum_images[j]
-                texts = accum_texts[j]
+
+            if args.accum_freq == 1:
                 with autocast():
                     model_out = model(images, texts)
+                    logit_scale = model_out["logit_scale"]
+                    if args.distill:
+                        with torch.no_grad():
+                            dist_model_out = dist_model(images, texts)
+                        model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+                    #logging.info(f'Calculating loss for epoch {epoch} and batch {i}.')    
+                    if args.multipositiveloss and args.distance is False:
+                        losses = loss(**model_out, tokenized_texts=labels,delta=args.delta,output_dict=True)
+                    elif args.multipositiveloss and args.distance is True:
+                        losses = loss(**model_out, tokenized_texts=labels,delta=args.delta,echotime=echotime,repetitiontime=repetitiontime,output_dict=True)
+                    else:
+                        losses = loss(**model_out, output_dict=True)
 
-                    inputs_no_accum = {}
-                    inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                    if "logit_bias" in model_out:
-                        inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
-
-                    inputs = {}
-                    for key, val in accum_features.items():
-                        accumulated = accum_features[key]
-                        inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
-
-                    losses = loss(**inputs, **inputs_no_accum,delta=args.delta, output_dict=True)
-                    del inputs
-                    del inputs_no_accum
                     total_loss = sum(losses.values())
                     losses["loss"] = total_loss
 
                 backward(total_loss, scaler)
+            else:
+                # First, cache the features without any gradient tracking.
+                with torch.no_grad():
+                    with autocast():
+                        model_out = model(images, texts)
 
-        if scaler is not None:
-            if args.horovod:
-                optimizer.synchronize()
-                scaler.unscale_(optimizer)
-                if args.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                with optimizer.skip_synchronize():
+                        for f in ("logit_scale", "logit_bias"):
+                            model_out.pop(f, None)
+
+                        for key, val in model_out.items():
+                            if key in accum_features:
+                                accum_features[key].append(val)
+                            else:
+                                accum_features[key] = [val]
+
+                    accum_images.append(images)
+                    accum_texts.append(texts)
+
+                # If (i + 1) % accum_freq is not zero, move on to the next batch.
+                if ((i + 1) % args.accum_freq) > 0:
+                    # FIXME this makes data time logging unreliable when accumulating
+                    continue
+
+                # Now, ready to take gradients for the last accum_freq batches.
+                # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
+                # Call backwards each time, but only step optimizer at the end.
+                optimizer.zero_grad()
+                for j in range(args.accum_freq):
+                    images = accum_images[j]
+                    texts = accum_texts[j]
+                    with autocast():
+                        model_out = model(images, texts)
+
+                        inputs_no_accum = {}
+                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
+                        if "logit_bias" in model_out:
+                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+
+                        inputs = {}
+                        for key, val in accum_features.items():
+                            accumulated = accum_features[key]
+                            inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
+
+                        losses = loss(**inputs, **inputs_no_accum,delta=args.delta, output_dict=True)
+                        del inputs
+                        del inputs_no_accum
+                        total_loss = sum(losses.values())
+                        losses["loss"] = total_loss
+
+                    backward(total_loss, scaler)
+
+            if scaler is not None:
+                if args.horovod:
+                    optimizer.synchronize()
+                    scaler.unscale_(optimizer)
+                    if args.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                    with optimizer.skip_synchronize():
+                        scaler.step(optimizer)
+                else:
+                    if args.grad_clip_norm is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
                     scaler.step(optimizer)
+                scaler.update()
             else:
                 if args.grad_clip_norm is not None:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                scaler.step(optimizer)
-            scaler.update()
-        else:
-            if args.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-            optimizer.step()
+                optimizer.step()
 
-        # reset gradient accum, if enabled
-        if args.accum_freq > 1:
-            accum_images, accum_texts, accum_features = [], [], {}
+            # reset gradient accum, if enabled
+            if args.accum_freq > 1:
+                accum_images, accum_texts, accum_features = [], [], {}
 
-        # Note: we clamp to 4.6052 = ln(100), as in the original paper.
-        with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
+            # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+            with torch.no_grad():
+                unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
-        batch_time_m.update(time.time() - end)
-        end = time.time()
-        batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
-            batch_size = len(images)
-            num_samples = batch_count * batch_size * args.accum_freq * args.world_size
-            samples_per_epoch = dataloader.num_samples
-            percent_complete = 100.0 * batch_count / num_batches_per_epoch
+            batch_time_m.update(time.time() - end)
+            end = time.time()
+            batch_count = i_accum + 1
+            if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
+                batch_size = len(images)
+                num_samples = batch_count * batch_size * args.accum_freq * args.world_size
+                samples_per_epoch = dataloader.num_samples
+                percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
-            # NOTE loss is coarsely sampled, just master node and per log update
-            for key, val in losses.items():
-                if key not in losses_m:
-                    losses_m[key] = AverageMeter()
-                losses_m[key].update(val.item(), batch_size)
+                # NOTE loss is coarsely sampled, just master node and per log update
+                for key, val in losses.items():
+                    if key not in losses_m:
+                        losses_m[key] = AverageMeter()
+                    losses_m[key].update(val.item(), batch_size)
 
-            logit_scale_scalar = logit_scale.item()
-            loss_log = " ".join(
-                [
-                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
-                    for loss_name, loss_m in losses_m.items()
-                ]
-            )
-            samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
-            samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
-            logging.info(
-                f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
-                f"Data (t): {data_time_m.avg:.3f} "
-                f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
-                f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
-            )
+                logit_scale_scalar = logit_scale.item()
+                loss_log = " ".join(
+                    [
+                        f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
+                        for loss_name, loss_m in losses_m.items()
+                    ]
+                )
+                samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
+                samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
+                logging.info(
+                    f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
+                    f"Data (t): {data_time_m.avg:.3f} "
+                    f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
+                    f"LR: {optimizer.param_groups[0]['lr']:5f} "
+                    f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+                )
 
-            # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
-            log_data = {
-                "data_time": data_time_m.val,
-                "batch_time": batch_time_m.val,
-                "samples_per_second": samples_per_second,
-                "samples_per_second_per_gpu": samples_per_second_per_gpu,
-                "scale": logit_scale_scalar,
-                "lr": optimizer.param_groups[0]["lr"]
-            }            
-            log_data.update({name:val.val for name,val in losses_m.items()})
+                # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
+                log_data = {
+                    "data_time": data_time_m.val,
+                    "batch_time": batch_time_m.val,
+                    "samples_per_second": samples_per_second,
+                    "samples_per_second_per_gpu": samples_per_second_per_gpu,
+                    "scale": logit_scale_scalar,
+                    "lr": optimizer.param_groups[0]["lr"]
+                }            
+                log_data.update({name:val.val for name,val in losses_m.items()})
 
-            log_data = {"train/" + name: val for name, val in log_data.items()}
+                log_data = {"train/" + name: val for name, val in log_data.items()}
 
-            if tb_writer is not None:
-                for name, val in log_data.items():
-                    tb_writer.add_scalar(name, val, step)
-            
-            if args.wandb:
-                assert wandb is not None, 'Please install wandb.'
-                log_data['step'] = step  # for backwards compatibility
-                wandb.log(log_data, step=step)
-            
-            # resetting batch / data time meters per log window
-            batch_time_m.reset()
-            data_time_m.reset()
-    # end for
+                if tb_writer is not None:
+                    for name, val in log_data.items():
+                        tb_writer.add_scalar(name, val, step)
+                
+                if args.wandb:
+                    assert wandb is not None, 'Please install wandb.'
+                    log_data['step'] = step  # for backwards compatibility
+                    wandb.log(log_data, step=step)
+                
+                # resetting batch / data time meters per log window
+                batch_time_m.reset()
+                data_time_m.reset()
+        except Exception as e:
+            # Catch any other unexpected errors during batch processing
+            if is_master(args):
+                logging.error(f"Unexpected error during batch processing: {str(e)}")
+            raise
+        
+        i += 1
+    # end while
+    if skipped_volumes > 0 and is_master(args):
+        logging.info(f"Training epoch {epoch}: Skipped {skipped_volumes} volumes due to normalization errors.")
+    gc.collect()
 
 
 def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
@@ -312,7 +338,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
                     image_features = model_out["image_features"]
                     text_features = model_out["text_features"]
                     logit_scale = model_out["logit_scale"]
-                    if args.metrics or (args.metrics is False and len(all_image_features) * args.batch_size < 10000):
+                    if args.metrics or (args.metrics is False and len(all_image_features) * args.batch_size < 25000):
                         all_image_features.append(image_features.cpu())
                         all_text_features.append(text_features.cpu())
                         for tokens in texts:
@@ -559,175 +585,199 @@ def train_one_epoch_vision_only(model, data, loss, epoch, optimizer, scaler, sch
     losses_m = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
+    skipped_volumes = 0
     end = time.time()
-    for i, batch in enumerate(dataloader):
-        i_accum = i // args.accum_freq
-        step = num_batches_per_epoch * epoch + i_accum
+    i = 0
+    dataloader_iter = iter(dataloader)
+    while True:
+        try:
+            batch = next(dataloader_iter)
+        except StopIteration:
+            break
+        except VolumeNormalizationError as e:
+            skipped_volumes += 1
+            if is_master(args) and skipped_volumes % 10 == 0:
+                logging.warning(f"Skipped {skipped_volumes} volumes due to normalization errors. Latest: {str(e)}")
+            continue
+        
+        try:
+            i_accum = i // args.accum_freq
+            step = num_batches_per_epoch * epoch + i_accum
 
-        if not args.skip_scheduler:
-            scheduler(step)
+            if not args.skip_scheduler:
+                scheduler(step)
 
-        images, texts,labels = batch
-        images = images.to(device=device, dtype=input_dtype, non_blocking=True)
-        texts = texts.to(device=device, non_blocking=True)
-        labels = labels.to(device=device, non_blocking=True)
+            images, texts,labels = batch
+            images = images.to(device=device, dtype=input_dtype, non_blocking=True)
+            texts = texts.to(device=device, non_blocking=True)
+            labels = labels.to(device=device, non_blocking=True)
 
-        data_time_m.update(time.time() - end)
-        optimizer.zero_grad()
-
-        if args.accum_freq == 1:
-            with autocast():
-                model_out = model(images)
-                logit_scale = model_out["logit_scale"]
-                if args.distill:
-                    with torch.no_grad():
-                        dist_model_out = dist_model(images)
-                    model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                if args.multipositiveloss:
-                    losses = loss(**model_out, tokenized_texts=labels,output_dict=True)
-                else:
-                    losses = loss(**model_out, output_dict=True)
-
-                total_loss = sum(losses.values())
-                losses["loss"] = total_loss
-
-            backward(total_loss, scaler)
-        else:
-            # First, cache the features without any gradient tracking.
-            with torch.no_grad():
-                with autocast():
-                    model_out = model(images)
-
-                    for f in ("logit_scale", "logit_bias"):
-                        model_out.pop(f, None)
-
-                    for key, val in model_out.items():
-                        if key in accum_features:
-                            accum_features[key].append(val)
-                        else:
-                            accum_features[key] = [val]
-
-                accum_images.append(images)
-                accum_texts.append(texts)
-
-            # If (i + 1) % accum_freq is not zero, move on to the next batch.
-            if ((i + 1) % args.accum_freq) > 0:
-                # FIXME this makes data time logging unreliable when accumulating
-                continue
-
-            # Now, ready to take gradients for the last accum_freq batches.
-            # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
-            # Call backwards each time, but only step optimizer at the end.
+            data_time_m.update(time.time() - end)
             optimizer.zero_grad()
-            for j in range(args.accum_freq):
-                images = accum_images[j]
-                texts = accum_texts[j]
+
+            if args.accum_freq == 1:
                 with autocast():
                     model_out = model(images)
+                    logit_scale = model_out["logit_scale"]
+                    if args.distill:
+                        with torch.no_grad():
+                            dist_model_out = dist_model(images)
+                        model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+                    if args.multipositiveloss:
+                        losses = loss(**model_out, tokenized_texts=labels,output_dict=True)
+                    else:
+                        losses = loss(**model_out, output_dict=True)
 
-                    inputs_no_accum = {}
-                    inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                    if "logit_bias" in model_out:
-                        inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
-
-                    inputs = {}
-                    for key, val in accum_features.items():
-                        accumulated = accum_features[key]
-                        inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
-
-                    losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                    del inputs
-                    del inputs_no_accum
                     total_loss = sum(losses.values())
                     losses["loss"] = total_loss
 
                 backward(total_loss, scaler)
+            else:
+                # First, cache the features without any gradient tracking.
+                with torch.no_grad():
+                    with autocast():
+                        model_out = model(images)
 
-        if scaler is not None:
-            if args.horovod:
-                optimizer.synchronize()
-                scaler.unscale_(optimizer)
-                if args.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                with optimizer.skip_synchronize():
+                        for f in ("logit_scale", "logit_bias"):
+                            model_out.pop(f, None)
+
+                        for key, val in model_out.items():
+                            if key in accum_features:
+                                accum_features[key].append(val)
+                            else:
+                                accum_features[key] = [val]
+
+                    accum_images.append(images)
+                    accum_texts.append(texts)
+
+                # If (i + 1) % accum_freq is not zero, move on to the next batch.
+                if ((i + 1) % args.accum_freq) > 0:
+                    # FIXME this makes data time logging unreliable when accumulating
+                    continue
+
+                # Now, ready to take gradients for the last accum_freq batches.
+                # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
+                # Call backwards each time, but only step optimizer at the end.
+                optimizer.zero_grad()
+                for j in range(args.accum_freq):
+                    images = accum_images[j]
+                    texts = accum_texts[j]
+                    with autocast():
+                        model_out = model(images)
+
+                        inputs_no_accum = {}
+                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
+                        if "logit_bias" in model_out:
+                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+
+                        inputs = {}
+                        for key, val in accum_features.items():
+                            accumulated = accum_features[key]
+                            inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
+
+                        losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        del inputs
+                        del inputs_no_accum
+                        total_loss = sum(losses.values())
+                        losses["loss"] = total_loss
+
+                    backward(total_loss, scaler)
+
+            if scaler is not None:
+                if args.horovod:
+                    optimizer.synchronize()
+                    scaler.unscale_(optimizer)
+                    if args.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                    with optimizer.skip_synchronize():
+                        scaler.step(optimizer)
+                else:
+                    if args.grad_clip_norm is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
                     scaler.step(optimizer)
+                scaler.update()
             else:
                 if args.grad_clip_norm is not None:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                scaler.step(optimizer)
-            scaler.update()
-        else:
-            if args.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-            optimizer.step()
+                optimizer.step()
 
-        # reset gradient accum, if enabled
-        if args.accum_freq > 1:
-            accum_images, accum_texts, accum_features = [], [], {}
+            # reset gradient accum, if enabled
+            if args.accum_freq > 1:
+                accum_images, accum_texts, accum_features = [], [], {}
 
-        # Note: we clamp to 4.6052 = ln(100), as in the original paper.
-        with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
+            # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+            with torch.no_grad():
+                unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
-        batch_time_m.update(time.time() - end)
-        end = time.time()
-        batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
-            batch_size = len(images)
-            num_samples = batch_count * batch_size * args.accum_freq * args.world_size
-            samples_per_epoch = dataloader.num_samples
-            percent_complete = 100.0 * batch_count / num_batches_per_epoch
+            batch_time_m.update(time.time() - end)
+            end = time.time()
+            batch_count = i_accum + 1
+            if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
+                batch_size = len(images)
+                num_samples = batch_count * batch_size * args.accum_freq * args.world_size
+                samples_per_epoch = dataloader.num_samples
+                percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
-            # NOTE loss is coarsely sampled, just master node and per log update
-            for key, val in losses.items():
-                if key not in losses_m:
-                    losses_m[key] = AverageMeter()
-                losses_m[key].update(val.item(), batch_size)
+                # NOTE loss is coarsely sampled, just master node and per log update
+                for key, val in losses.items():
+                    if key not in losses_m:
+                        losses_m[key] = AverageMeter()
+                    losses_m[key].update(val.item(), batch_size)
 
-            logit_scale_scalar = logit_scale.item()
-            loss_log = " ".join(
-                [
-                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
-                    for loss_name, loss_m in losses_m.items()
-                ]
-            )
-            samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
-            samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
-            logging.info(
-                f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
-                f"Data (t): {data_time_m.avg:.3f} "
-                f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
-                f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
-            )
+                logit_scale_scalar = logit_scale.item()
+                loss_log = " ".join(
+                    [
+                        f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
+                        for loss_name, loss_m in losses_m.items()
+                    ]
+                )
+                samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
+                samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
+                logging.info(
+                    f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
+                    f"Data (t): {data_time_m.avg:.3f} "
+                    f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
+                    f"LR: {optimizer.param_groups[0]['lr']:5f} "
+                    f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+                )
 
-            # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
-            log_data = {
-                "data_time": data_time_m.val,
-                "batch_time": batch_time_m.val,
-                "samples_per_second": samples_per_second,
-                "samples_per_second_per_gpu": samples_per_second_per_gpu,
-                "scale": logit_scale_scalar,
-                "lr": optimizer.param_groups[0]["lr"]
-            }            
-            log_data.update({name:val.val for name,val in losses_m.items()})
+                # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
+                log_data = {
+                    "data_time": data_time_m.val,
+                    "batch_time": batch_time_m.val,
+                    "samples_per_second": samples_per_second,
+                    "samples_per_second_per_gpu": samples_per_second_per_gpu,
+                    "scale": logit_scale_scalar,
+                    "lr": optimizer.param_groups[0]["lr"]
+                }            
+                log_data.update({name:val.val for name,val in losses_m.items()})
 
-            log_data = {"train/" + name: val for name, val in log_data.items()}
+                log_data = {"train/" + name: val for name, val in log_data.items()}
 
-            if tb_writer is not None:
-                for name, val in log_data.items():
-                    tb_writer.add_scalar(name, val, step)
-            
-            if args.wandb:
-                assert wandb is not None, 'Please install wandb.'
-                log_data['step'] = step  # for backwards compatibility
-                wandb.log(log_data, step=step)
-            
-            # resetting batch / data time meters per log window
-            batch_time_m.reset()
-            data_time_m.reset()
-    # end for
+                if tb_writer is not None:
+                    for name, val in log_data.items():
+                        tb_writer.add_scalar(name, val, step)
+                
+                if args.wandb:
+                    assert wandb is not None, 'Please install wandb.'
+                    log_data['step'] = step  # for backwards compatibility
+                    wandb.log(log_data, step=step)
+                
+                # resetting batch / data time meters per log window
+                batch_time_m.reset()
+                data_time_m.reset()
+        except Exception as e:
+            # Catch any other unexpected errors during batch processing
+            if is_master(args):
+                logging.error(f"Unexpected error during batch processing: {str(e)}")
+            raise
+        
+        i += 1
+    # end while
+    if skipped_volumes > 0 and is_master(args):
+        logging.info(f"Training epoch {epoch}: Skipped {skipped_volumes} volumes due to normalization errors.")
+    gc.collect()
 
 
 def evaluate_vision_only(model, data, epoch, args, tb_writer=None, tokenizer=None):
@@ -855,6 +905,7 @@ def evaluate_vision_only(model, data, epoch, args, tb_writer=None, tokenizer=Non
         wandb.log(log_data, step=step)
 
     return metrics
+import pickle
 
 def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None):
     """
@@ -895,7 +946,8 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
     global_text_map = {}
     global_label_map = {}
     text_features_list = []
-
+    if args.save_embeddings:
+        text_features_list_all = []
     with torch.no_grad():
         for i in range(0, num_samples, batch_size):
             # Initialize batch_texts with the captions for the current batch
@@ -918,7 +970,11 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
                 with autocast():
                     batch_feats = model.encode_text(batch_tokenized)
                 text_features_list.append(batch_feats.detach().cpu())
-
+            if args.save_embeddings:
+                batch_tokenized = tokenizer(batch_texts).to(device)
+                with autocast():
+                    batch_feats = model.encode_text(batch_tokenized)
+                text_features_list_all.append(batch_feats.detach().cpu())
     # Concatenate all text features
     text_features = torch.cat(text_features_list, dim=0)  # shape: (N, D)
 
@@ -1078,9 +1134,25 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
     overall_metrics["image_to_text_median_rank"] = np.floor(np.median(i2t_ranks)) + 1
     for k in [1, 5, 10]:
         overall_metrics[f"image_to_text_R@{k}"] = np.mean(i2t_ranks < k)
+    if args.save_embeddings:
+        text_features_list_all = torch.cat(text_features_list_all, dim=0)  # shape: (N, D)
+        # Save text embeddings, labels, and filepaths
+        # Save text embeddings, labels, and captions (filepaths)
+        text_emb_dict = {
+            "embeddings": text_features_list_all.numpy(),
+            "labels": filtered_labels,
+            "captions": list(global_text_map.keys())
+        }
+        # Save path for the pickle file
+        save_path = os.path.join(args.checkpoint_path, "text_embeddings.pkl")
 
-    # Free text_features to reclaim memory.
-    del text_features
+        # Write to file
+        with open(save_path, "wb") as f:
+            pickle.dump(text_emb_dict, f)
+
+        print(f"Saved embeddings, labels, and captions to {save_path}")
+        # Free text_features to reclaim memory.
+        del text_features
 
     # -------------------- Block 2: Text-to-Image Metrics -------------------- #
     # Precompute image features (NxD) in batches.
@@ -1156,7 +1228,21 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
     overall_metrics["text_to_image_median_rank"] = np.floor(np.median(t2i_ranks)) + 1
     for k in [1, 5, 10]:
         overall_metrics[f"text_to_image_R@{k}"] = np.mean(t2i_ranks < k)
+    if args.save_embeddings:
+        # Save image embeddings, labels, and filepaths
+        image_emb_dict = {
+            "embeddings": image_features.numpy(),
+            "labels": [dataset.labels[i] for i in range(num_samples)],
+            "filepaths": [dataset.images[i] for i in range(num_samples)]
+        }
+            # Save path for the pickle file
+        save_path = os.path.join(args.checkpoint_path, "image_embeddings.pkl")
 
+        # Write to file
+        with open(save_path, "wb") as f:
+            pickle.dump(image_emb_dict, f)
+
+        print(f"Saved embeddings, labels, and captions to {save_path}")
     # Free image_features to reclaim memory.
     del image_features
 
@@ -1184,7 +1270,6 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
             for name, vocab in vocabulary.items()
         }
         # Load existing vocabulary if it exists
-        logging.info("Loading existing vocabulary if available...")
         vocab_file_path = os.path.join(args.checkpoint_path, "vocabulary.json")
         if os.path.exists(vocab_file_path):
             with open(vocab_file_path, "r") as f:
@@ -1200,7 +1285,6 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
                 existing_vocab[name] = vocab
         existing_vocab["epoch"] = 'test'
         # Save the updated vocabulary to a JSON file
-        logging.info(f"Saving vocabulary to {vocab_file_path}...")
         with open(vocab_file_path, "w") as f:
             json.dump(existing_vocab, f, indent=4)
 
@@ -1220,222 +1304,3 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
                     image_save_file = os.path.join(image_save_path, f"{name}_{key}_anchor_{anchor_idx}_label_{label}_idx_{values['indices'][idx]}.png")
                     image.save(image_save_file)
     return overall_metrics
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GridSearchCV
-
-import os
-import torch
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-import logging
-import joblib
-from sklearn.metrics import accuracy_score
-
-def get_features(dataset, model, device, batch_size=512, precision="fp16"):
-    all_features = []
-    all_labels = []
-    input_dtype = get_input_dtype(precision)
-    model.eval()
-
-
-    autocast = get_autocast(precision, device_type=device.type)
-
-
-    num_samples = len(dataset.images)
-    all_features = []
-    with torch.no_grad():
-        for i in range(0, num_samples, batch_size):
-            batch_images = [dataset[j][0] for j in range(i, min(i + batch_size, num_samples))]
-            batch_images = torch.stack(batch_images).to(device, dtype=input_dtype)
-            batch_labels = dataset.labels[i : i + batch_size]
-            with autocast():
-                batch_feats = model.encode_image(batch_images)
-            all_features.append(batch_feats.detach().cpu())
-
-            
-            all_labels.extend(batch_labels)
-
-    all_features = torch.cat(all_features, dim=0)
-    all_labels = torch.tensor(all_labels)
-
-    return all_features.numpy(), all_labels.numpy()
-
-# def linear_probe(model, data, start_epoch, args, tb_writer=None, tokenizer=None):
-#     """
-#     Performs linear probe following original CLIP style:
-#       1. Precompute train features
-#       2. Precompute val features
-#       3. Train Logistic Regression
-#       4. Evaluate
-#     """
-#     device = torch.device(args.device)
-#     precision = args.precision
-#     batch_size = args.batch_size
-
-#     # logging.info("Precomputing train features...")
-#     # train_dataset = data["train"].dataloader.dataset
-#     # train_features, train_labels = get_features(train_dataset, model, device, batch_size, precision)
-#     # # Save train features and labels
-#     # train_save_path = os.path.join(args.checkpoint_path, "train_features_and_labels.npz")
-#     # np.savez(train_save_path, features=train_features, labels=train_labels)
-#     # logging.info(f"Saved train features and labels to {train_save_path}")
-
-#     logging.info("Precomputing val features...")
-#     val_dataset = data["val"].dataloader.dataset
-#     val_features, val_labels = get_features(val_dataset, model, device, batch_size, precision)
-#     # Save validation features and labels
-#     val_save_path = os.path.join(args.checkpoint_path, "val_features_and_labels.npz")
-#     np.savez(val_save_path, features=val_features, labels=val_labels)
-#     logging.info(f"Saved val features and labels to {val_save_path}")
-#     # Load precomputed train features and labels
-#     train_save_path = os.path.join(args.checkpoint_path, "train_features_and_labels.npz")
-#     logging.info(f"Loading train features and labels from {train_save_path}...")
-#     train_data = np.load(train_save_path)
-#     train_features = train_data["features"]
-#     train_labels = train_data["labels"]
-
-#     # # Load precomputed validation features and labels
-#     # val_save_path = os.path.join(args.checkpoint_path, "val_features_and_labels.npz")
-#     # logging.info(f"Loading val features and labels from {val_save_path}...")
-#     # val_data = np.load(val_save_path)
-#     # val_features = val_data["features"]
-#     # val_labels = val_data["labels"]
-#     # logging.info(f"Train feature shape: {train_features.shape}, Val feature shape: {val_features.shape}")
-
-#     # Use validation set as cross-validation test set
-#     X_train, y_train = train_features, train_labels
-#     X_val, y_val = val_features, val_labels
-
-#     C_values = [ 5e-2, 0.0516, 0.2,0.316,0.4, 0.56, 2.0, 4.16]
-#     solver = "lbfgs"
-#     multi_class = "multinomial"
-#     max_iter = 1000
-
-#     best_accuracy = 0
-#     best_model = None
-#     best_C = None
-
-#     logging.info("Starting manual hyperparameter search over C values.")
-
-#     for C in C_values:
-#         logging.info(f"Trying LogisticRegression with C={C}, solver={solver}, multi_class={multi_class}, max_iter={max_iter}")
-        
-#         model = LogisticRegression(
-#             C=C,
-#             solver=solver,
-#             multi_class=multi_class,
-#             max_iter=max_iter,
-#             random_state=0,
-#             verbose=1  # This enables internal solver logs
-#         )
-
-#         # Concatenate train and val for fitting as done in GridSearchCV
-#         X_all = np.concatenate([X_train, X_val])
-#         y_all = np.concatenate([y_train, y_val])
-
-#         # Create manual training/validation split
-#         train_idx = np.arange(len(X_train))
-#         val_idx = np.arange(len(X_train), len(X_train) + len(X_val))
-
-#         X_fit = X_all[train_idx]
-#         y_fit = y_all[train_idx]
-#         X_eval = X_all[val_idx]
-#         y_eval = y_all[val_idx]
-
-#         logging.info("Fitting model...")
-#         model.fit(X_fit, y_fit)
-
-#         logging.info("Predicting on validation set...")
-#         val_predictions = model.predict(X_eval)
-#         val_accuracy = accuracy_score(y_eval, val_predictions) * 100.0
-
-#         logging.info(f"Validation accuracy for C={C:.5f}: {val_accuracy:.2f}%")
-
-#         if val_accuracy > best_accuracy:
-#             logging.info("New best model found.")
-#             best_accuracy = val_accuracy
-#             best_model = model
-#             best_C = C
-#         else:
-#             logging.debug("Model did not improve.")
-
-#     # Save predictions and model
-#     logging.info("Finished hyperparameter search.")
-#     output_dir = args.checkpoint_path
-#     os.makedirs(output_dir, exist_ok=True)
-
-#     logging.info(f"Best C: {best_C}")
-#     best_val_predictions = best_model.predict(X_val)
-#     predictions_path = os.path.join(output_dir, "predictions_and_labels.npz")
-#     np.savez(predictions_path, predictions=best_val_predictions, val_labels=y_val)
-#     logging.info(f"Saved predictions and labels to {predictions_path}")
-
-#     model_path = os.path.join(output_dir, "logistic_regression.joblib")
-#     joblib.dump(best_model, model_path)
-#     logging.info(f"Saved trained logistic regression model to {model_path}")
-#     logging.info(f"Best validation accuracy: {best_accuracy:.2f}%")
-
-#     return best_model, best_accuracy
-def linear_probe(model, data, start_epoch, args, tb_writer=None, tokenizer=None):
-    """
-    Performs linear probe following original CLIP style:
-      1. Precompute train features
-      2. Precompute val features
-      3. Train Logistic Regression with fixed C
-      4. Evaluate
-    """
-    device = torch.device(args.device)
-    precision = args.precision
-    batch_size = args.batch_size
-
-    # Check if train features already exist
-    train_save_path = os.path.join(args.checkpoint_path, "train_features_and_labels.npz")
-    if os.path.exists(train_save_path):
-        logging.info(f"Loading precomputed train features and labels from {train_save_path}...")
-        train_data = np.load(train_save_path)
-        train_features = train_data["features"]
-        train_labels = train_data["labels"]
-    else:
-        # Precompute train features
-        logging.info("Precomputing train features...")
-        train_dataset = data["train"].dataloader.dataset
-        train_features, train_labels = get_features(train_dataset, model, device, batch_size, precision)
-        np.savez(train_save_path, features=train_features, labels=train_labels)
-        logging.info(f"Saved train features and labels to {train_save_path}")
-
-    # Precompute val features
-    logging.info("Precomputing val features...")
-    val_dataset = data["val"].dataloader.dataset
-    val_features, val_labels = get_features(val_dataset, model, device, batch_size, precision)
-    val_save_path = os.path.join(args.checkpoint_path, "val_features_and_labels.npz")
-    np.savez(val_save_path, features=val_features, labels=val_labels)
-    logging.info(f"Saved val features and labels to {val_save_path}")
-
-    logging.info(f"Train feature shape: {train_features.shape}, Val feature shape: {val_features.shape}")
-
-    # Train Logistic Regression with C=4.16
-    C = 4.16
-    logging.info(f"Training Logistic Regression with C={C}...")
-    clf = LogisticRegression(C=C, solver="lbfgs", multi_class="multinomial", max_iter=1000, random_state=0)
-    clf.fit(train_features, train_labels)
-
-    # Evaluate on validation set
-    logging.info("Evaluating on validation set...")
-    val_predictions = clf.predict(val_features)
-    val_accuracy = accuracy_score(val_labels, val_predictions) * 100.0
-    logging.info(f"Validation accuracy: {val_accuracy:.2f}%")
-
-    # Save predictions and model
-    output_dir = args.checkpoint_path
-    os.makedirs(output_dir, exist_ok=True)
-    predictions_path = os.path.join(output_dir, "predictions_and_labels.npz")
-    np.savez(predictions_path, predictions=val_predictions, val_labels=val_labels)
-    logging.info(f"Saved predictions and labels to {predictions_path}")
-
-    model_path = os.path.join(output_dir, "logistic_regression.joblib")
-    joblib.dump(clf, model_path)
-    logging.info(f"Saved trained logistic regression model to {model_path}")
-
-    return clf, val_accuracy

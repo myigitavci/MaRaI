@@ -32,7 +32,8 @@ try:
 except ImportError:
     hvd = None
 
-from open_clip import create_model_and_transforms, trace_model, get_tokenizer, create_loss
+from open_clip.factory import create_model_and_transforms, get_tokenizer, create_loss
+from open_clip.model import trace_model
 from open_clip_train.data import get_data
 from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object
 from open_clip_train.logger import setup_logging
@@ -40,9 +41,11 @@ from open_clip_train.params import parse_args
 from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from open_clip_train.train import train_one_epoch, evaluate, train_one_epoch_vision_only, evaluate_vision_only,linear_probe,test_metrics
 from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
-
+from open_clip_train.linear import linear_probe_from_scratch, test_existing_classifier
+from open_clip_train.quality_control_heatmap import quality_control_heatmap
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 def add_dropout(model, p=0.4):
     """Adds dropout layers after MultiheadAttention and MLP projections if not present."""
@@ -99,7 +102,11 @@ def main(args):
 
     # fully initialize distributed device environment
     device = init_distributed_device(args)
+    print("CUDA available:", torch.cuda.is_available())
+    print("CUDA device count:", torch.cuda.device_count())
 
+    for i in range(torch.cuda.device_count()):
+        print(f"Device {i}:", torch.cuda.get_device_name(i))
     # get the name of the experiments
     if args.name is None:
         # sanitize model name for filesystem / uri use, easier if we don't use / in name as a rule?
@@ -233,6 +240,20 @@ def main(args):
     if isinstance(args.force_image_size, (tuple, list)) and len(args.force_image_size) == 1:
         # arg is nargs, single (square) image size list -> int
         args.force_image_size = args.force_image_size[0]
+
+    # If skull cropping is requested, pass flag via aug_cfg so 3D transforms can pick crop
+    if args.skull or args.no_fixed_crop:
+        if args.aug_cfg is None:
+            args.aug_cfg = {}
+        # ParseKwargs can give an empty dict; ensure it's mutable
+        if not isinstance(args.aug_cfg, dict):
+            args.aug_cfg = dict(args.aug_cfg)
+        if args.skull:
+            args.aug_cfg["skull"] = True
+        if args.no_fixed_crop:
+            # disable default fixed crop; only effective for 3D transforms
+            args.aug_cfg["use_default_crop"] = False
+
     random_seed(args.seed, 0)
     model_kwargs = {}
     if args.siglip:
@@ -259,8 +280,13 @@ def main(args):
         vision_only=args.visiononly,
         logitscaletrainable=args.logitscaletrainable,
         tabular=args.tabular,
+        vis_3d=args.vis_3d,
+        textcontextlength=args.textcontextlength,
+        # rgb=args.rgb,  # use RGB images instead of grayscale
         **model_kwargs,
     )
+    import torch.nn as nn
+
 
     # Apply to your transformer model
     if args.textdropout is not None:
@@ -420,9 +446,8 @@ def main(args):
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     # initialize datasets
-    tokenizer = get_tokenizer(args.model, cache_dir=args.cache_dir)
+    tokenizer = get_tokenizer(args.model, cache_dir=args.cache_dir,context_length=args.textcontextlength)
     logging.info(f"Using tokenizer with context length {tokenizer.context_length} ")
-
     data = get_data(
         args,
         (preprocess_train, preprocess_val),
@@ -433,9 +458,49 @@ def main(args):
     if args.linear:
         linear_probe(model, data, start_epoch, args, tokenizer=tokenizer)
         return
+    if args.quality_control_heatmap:
+        quality_control_heatmap(model, data, start_epoch, args, tokenizer=tokenizer, error_types=args.quality_control_heatmap_error_types)
+        return    
+    if args.linear_sequence:
+        if args.train_data is not None:
+            linear_probe_from_scratch(model, data, args)
+            return
+        else:
+            test_existing_classifier(model, data, args)
+            return
     if args.test:
         test_metrics(model, data, start_epoch, args, tokenizer=tokenizer)
         return
+    # if args.tsne:
+    #     # Load the CSV file
+    #     csv_path = "your_file.csv"  # Change this to your actual file path
+    #     df = pd.read_csv(csv_path)
+
+    #     # Tokenization using TF-IDF
+    #     text_features = tokenizer(df['text'])
+
+    #     # Apply t-SNE
+    #     tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    #     tsne_results = tsne.fit_transform(text_features.toarray())
+
+    #     # Convert to DataFrame
+    #     df['tsne-2d-one'] = tsne_results[:, 0]
+    #     df['tsne-2d-two'] = tsne_results[:, 1]
+
+    #     # Plot t-SNE with labels
+    #     plt.figure(figsize=(10, 6))
+    #     sns.scatterplot(
+    #         x="tsne-2d-one", y="tsne-2d-two",
+    #         hue=df['label'].astype(str),  # Convert labels to string for better coloring
+    #         palette=sns.color_palette("hsv", len(df['label'].unique())),
+    #         data=df,
+    #         legend="full",
+    #         alpha=0.7
+    #     )
+
+    #     plt.title("t-SNE Visualization of Tokenized Texts")
+    #     plt.show()
+    #     plt.savefig(args.checkpoint_path + '/tsne.png')
     # create scheduler if train
     scheduler = None
     if 'train' in data and optimizer is not None:
