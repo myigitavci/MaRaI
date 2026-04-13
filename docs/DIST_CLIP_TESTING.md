@@ -45,7 +45,7 @@ MRCLIP_FOR_DISTCLIP=/path/to/epoch_latest.pt
 ## 3. Input Format
 
 All inputs are **NIfTI** volumes (`.nii` or `.nii.gz`), expected to be:
-- Brain-extracted (skull-stripped) or with skull — both work
+- Mapped to MNI 1mm space and Brain-extracted (skull-stripped)
 - Any orientation (axial processing is applied slice-by-slice)
 
 For **batch mode**, a CSV file is required with the following columns:
