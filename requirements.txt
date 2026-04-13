@@ -1,19 +1,46 @@
-torch>=1.9.0
+torch
 torchvision
-webdataset>=0.2.5,<=0.2.86
+torchaudio
+
+webdataset
+braceexpand
 regex
 ftfy
-tqdm
-pandas
-braceexpand
+
+transformers
 huggingface_hub
 safetensors
-transformers[sentencepiece]
-timm>=1.0.10
-fsspec
-seaborn
-scikit-learn
+timm
+
+# Medical imaging
+nibabel
+monai
+SimpleITK
+torchio
+pydicom
+
+# Image processing
+Pillow
+scikit-image
+scipy
+imageio
+
+# Data / ML
 pandas
 numpy
-nibabel
-pydicom
+scikit-learn
+fsspec
+
+# Visualisation
+matplotlib
+seaborn
+
+# Utilities
+tqdm
+tensorboard
+packaging
+requests
+click
+typer
+rich
+gdown

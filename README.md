@@ -70,12 +70,30 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 ---
 
+### Dist-CLIP — MRI Contrast Harmonisation
+
+**Dist-CLIP** synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen **MR-CLIP** backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
+
+**Key highlights:**
+- 🎨 Harmonise across T1w, T2w, FLAIR, T2\*, PDw and more
+- 🖼️ **Image-guided**: provide a reference scan as the style target
+- 📝 **Text-guided**: describe the target contrast in plain language
+- 🔗 Built on MR-CLIP representations — no manual labels required
+- 📦 Works on full NIfTI volumes (slice-by-slice processing)
+
+---
+
 ## 📦 Pretrained Weights
 
 | Model | Type | Input | Config | Download |
 |:------|:-----|:------|:-------|:---------|
-| MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
-| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 128x128x128, no skull | 🔜 [Coming Soon](#) |
+| MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=drive_link) |
+| MR-CLIP (1-ch) | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](#) |
+| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | 🔜 [Coming Soon](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
+| Dist-CLIP | U-Net + MR-CLIP | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | 🔜 [Coming Soon](#) |
+
+
+
 
 
 ---
@@ -102,6 +120,7 @@ The preprocessing pipeline converts raw NIfTI + DICOM data into training-ready C
 ```bash
 jupyter notebook preprocessing.ipynb
 ```
+
 
 ### Training & Testing
 
@@ -130,9 +149,24 @@ Detailed instructions for evaluation:
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+#### 📖 [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md)
+
+How to run MRI harmonisation:
+- Single volume inference (image- or text-guided)
+- CSV batch evaluation with metrics
+- Input / output file formats
+- Key parameters
+
+</td>
+<td></td>
+</tr>
 </table>
 
 ---
+
 
 ## 🎯 Quick Examples
 
@@ -178,7 +212,32 @@ python -m open_clip_train.main \
 
 > 📖 See the [Training Guide](docs/TRAINING.md) and [Testing Guide](docs/TESTING.md) for complete documentation.
 
+### Dist-CLIP — Single Volume Harmonisation
+
+```bash
+cd src
+
+# Image-guided: harmonise T1w → T2w style
+python -m dist_clip.test single \
+    --source      /data/sub01_t1w.nii.gz \
+    --target      /data/sub01_t2w.nii.gz \
+    --weights     /checkpoints/dist_clip/epoch100_model.pt \
+    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --out-dir     /results/
+
+# Text-guided
+python -m dist_clip.test single \
+    --source       /data/sub01_t1w.nii.gz \
+    --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
+    --weights      /checkpoints/dist_clip/epoch100_model.pt \
+    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --out-dir      /results/
+```
+
+> 📖 See the [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md) for full documentation.
+
 ---
+
 
 ## 🔑 Key Parameters
 
@@ -214,6 +273,15 @@ If you use any code or models from this repository, please cite:
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2511.00681}, 
+}
+@misc{avci2025distcliparbitrarymetadataimage,
+      title={DIST-CLIP: Arbitrary Metadata and Image Guided MRI Harmonization via Disentangled Anatomy-Contrast Representations}, 
+      author={Mehmet Yigit Avci and Pedro Borges and Virginia Fernandez and Paul Wright and Mehmet Yigitsoy and Sebastien Ourselin and Jorge Cardoso},
+      year={2025},
+      eprint={2512.07674},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2512.07674}, 
 }
 ```
 
