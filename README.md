@@ -71,7 +71,11 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 ---
 
 ### Dist-CLIP — MRI Contrast Harmonisation
+<div align="center">
+  <img src="docs/DIST_CLIP_Short.png" alt="3D MR-CLIP" width="700"/>
+</div>
 
+<br/>
 **Dist-CLIP** synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen **MR-CLIP** backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
 
 **Key highlights:**
@@ -88,9 +92,14 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | Model | Type | Input | Config | Download |
 |:------|:-----|:------|:-------|:---------|
 | MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=drive_link) |
-| MR-CLIP (1-ch) | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](#) |
 | MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | 🔜 [Coming Soon](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
-| Dist-CLIP | U-Net + MR-CLIP | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | 🔜 [Coming Soon](#) |
+| MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
+| Dist-CLIP | U-Net decoder + style modules | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
+
+> [!IMPORTANT]
+> Dist-CLIP inference needs **both** checkpoints:
+> - `--weights`: Dist-CLIP checkpoint
+> - `--clip-weights`: MR-CLIP (1-ch) checkpoint 
 
 
 
@@ -217,20 +226,24 @@ python -m open_clip_train.main \
 ```bash
 cd src
 
+# Required checkpoints:
+DISTCLIP_WEIGHTS=/path/to/dist_clip.pt
+MRCLIP_FOR_DISTCLIP=/path/to/dist_clip_mr_clip.pt
+
 # Image-guided: harmonise T1w → T2w style
 python -m dist_clip.test single \
     --source      /data/sub01_t1w.nii.gz \
     --target      /data/sub01_t2w.nii.gz \
-    --weights     /checkpoints/dist_clip/epoch100_model.pt \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights     ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir     /results/
 
 # Text-guided
 python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
     --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
-    --weights      /checkpoints/dist_clip/epoch100_model.pt \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights      ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/
 ```
 

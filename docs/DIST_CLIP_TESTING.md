@@ -19,15 +19,26 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Pretrained Weights
+## 2. Required Pretrained Weights
 
-| Component | Download |
-|:----------|:---------|
-| **MR-CLIP (2D, 1-ch)** | [⬇️ Download](https://drive.google.com/file/d/1Xy_Z-Xy_Z-Xy_Z/view?usp=drive_link) |
-| **Dist-CLIP** | 🔜 Coming soon |
+Dist-CLIP inference needs **two separate checkpoints**:
+
+1. **Dist-CLIP weights** (passed to `--weights`)
+2. **MR-CLIP 1-channel weights for Dist-CLIP** (passed to `--clip-weights`)
+
+| Component | Used by CLI arg | Download |
+|:----------|:----------------|:---------|
+| **Dist-CLIP checkpoint** | `--weights` | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
+| **MR-CLIP (1-ch) for Dist-CLIP** | `--clip-weights` | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
 
 > [!IMPORTANT]
-> **Dist-CLIP** requires the **1-channel** version of MR-CLIP, which is different from the original 3-channel version used in other tasks. Use the link above for the correct backbone weights.
+> Use the **1-channel MR-CLIP checkpoint** above for Dist-CLIP. Other MR-CLIP checkpoints are not drop-in replacements.
+
+Example:
+```bash
+DISTCLIP_WEIGHTS=/path/to/epoch026_model.pt
+MRCLIP_FOR_DISTCLIP=/path/to/epoch_latest.pt
+```
 
 ---
 
@@ -70,8 +81,8 @@ cd src
 python -m dist_clip.test single \
     --source      /data/sub01_t1w.nii.gz \
     --target      /data/sub01_t2w.nii.gz \
-    --weights     /checkpoints/dist_clip/epoch100_model.pt \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights     ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir     /results/sub01/
 ```
 Output: `/results/sub01/sub01_t1w_to_sub01_t2w_dist_clip.nii.gz`
@@ -82,8 +93,8 @@ cd src
 python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
     --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
-    --weights      /checkpoints/dist_clip/epoch100_model.pt \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights      ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/sub01/
 ```
 Output: `/results/sub01/sub01_t1w_dist_clip_text.nii.gz`
@@ -94,8 +105,8 @@ python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
     --target       /data/sub01_t2w.nii.gz \
     --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
-    --weights      /checkpoints/dist_clip/epoch100_model.pt \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights      ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/sub01/
 ```
 Both outputs are saved (with `_text` and `_img` variants).
@@ -110,8 +121,8 @@ Runs inference on all source/target pairs in a CSV and computes SSIM, PSNR, and 
 cd src
 python -m dist_clip.test batch \
     --csv          /data/test_pairs.csv \
-    --weights      /checkpoints/dist_clip/ \
-    --clip-weights /checkpoints/mr_clip_2d/epoch_latest.pt \
+    --weights      ${DISTCLIP_WEIGHTS} \
+    --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/batch_eval/
 ```
 

@@ -43,6 +43,7 @@ import csv
 import numpy as np
 import torch
 import nibabel as nib
+from scipy.ndimage import zoom
 from torch.utils.data import DataLoader
 
 from dist_clip.modules.model_new import DIST_CLIP
@@ -95,6 +96,24 @@ def _tensor_to_vol(t: torch.Tensor) -> np.ndarray:
     """
     arr = t.clamp(0, 1).squeeze(1).detach().cpu().numpy()  # [S, H, W]
     return arr.transpose(1, 2, 0)  # [H, W, S]
+
+
+def _resize_volume_to_shape(vol: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Resize a [H, W, S] volume to target shape using trilinear interpolation."""
+    if tuple(vol.shape) == tuple(target_shape):
+        return vol.astype(np.float32, copy=False)
+
+    factors = tuple(ts / vs for ts, vs in zip(target_shape, vol.shape))
+    vol_resized = zoom(vol, zoom=factors, order=1)
+
+    # Guard against minor rounding differences from interpolation.
+    if tuple(vol_resized.shape) != tuple(target_shape):
+        fixed = np.zeros(target_shape, dtype=np.float32)
+        mins = tuple(min(a, b) for a, b in zip(target_shape, vol_resized.shape))
+        fixed[:mins[0], :mins[1], :mins[2]] = vol_resized[:mins[0], :mins[1], :mins[2]]
+        vol_resized = fixed
+
+    return vol_resized.astype(np.float32, copy=False)
 
 
 def _build_model(args) -> DIST_CLIP:
@@ -210,6 +229,7 @@ def run_single(args):
                 src_flat, src_flat, src_clip_text, tgt_clip_text, mask
             )
             vol_rec = _tensor_to_vol(output_text)          # [H, W, S]
+            vol_rec = _resize_volume_to_shape(vol_rec, src_vol.shape)
             out_name = f"{src_base}_dist_clip_text{out_suffix}.nii.gz"
             out_path = os.path.join(args.out_dir, out_name)
             nib.save(nib.Nifti1Image(vol_rec, src_nib.affine, src_nib.header), out_path)
@@ -237,6 +257,7 @@ def run_single(args):
                 target_contrast_feat_precomputed=tgt_emb_bc,
             )
             vol_rec = _tensor_to_vol(output_img)               # [H, W, S]
+            vol_rec = _resize_volume_to_shape(vol_rec, src_vol.shape)
             tgt_base = os.path.splitext(os.path.basename(args.target))[0].replace(".nii", "")
             out_name = f"{src_base}_to_{tgt_base}_dist_clip{out_suffix}.nii.gz"
             out_path = os.path.join(args.out_dir, out_name)
