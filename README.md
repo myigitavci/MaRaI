@@ -92,7 +92,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | Model | Type | Input | Config | Download |
 |:------|:-----|:------|:-------|:---------|
 | MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=drive_link) |
-| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | 🔜 [⬇️ Download](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
+| MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | [⬇️ Download](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
 | MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
 | DIST-CLIP | U-Net decoder + style modules | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
 
