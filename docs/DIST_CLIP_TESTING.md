@@ -123,7 +123,9 @@ python -m dist_clip.test batch \
     --csv          /data/test_pairs.csv \
     --weights      ${DISTCLIP_WEIGHTS} \
     --clip-weights ${MRCLIP_FOR_DISTCLIP} \
-    --out-dir      /results/batch_eval/
+    --out-dir      /results/batch_eval/ \
+    --use-beta \
+    --beta-dim 1
 ```
 
 Outputs (written to `--out-dir/eval_outputs/`):
@@ -142,7 +144,7 @@ Outputs (written to `--out-dir/eval_outputs/`):
 | `--gpu-id` | `0` | GPU index to use |
 | `--use-contrast-feat` | `enhancedv2` | Style conditioning variant |
 | `--base-ch` | `16` | U-Net base channels (must match training config) |
-| `--beta-dim` | `3` | Beta encoder dimension (must match training config) |
+| `--beta-dim` | `1` | Beta encoder dimension (must match training config) |
 | `--text-context-length` | `98` | CLIP text context length (must match MR-CLIP config) |
 
 ---
