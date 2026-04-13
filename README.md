@@ -229,6 +229,7 @@ cd src
 # Required checkpoints:
 DISTCLIP_WEIGHTS=/path/to/dist_clip.pt
 MRCLIP_FOR_DISTCLIP=/path/to/dist_clip_mr_clip.pt
+TARGET_T2_TEXT="A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)"
 
 # Image-guided: harmonise T1w → T2w style
 python -m dist_clip.test single \
@@ -241,13 +242,13 @@ python -m dist_clip.test single \
 # Text-guided
 python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
-    --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
+    --target-text  "${TARGET_T2_TEXT}" \
     --weights      ${DISTCLIP_WEIGHTS} \
     --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/
 ```
 
-> 📖 See the [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md) for full documentation.
+> 📖 See the [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md) for full documentation and [Metadata Text Format](docs/METADATA_TEXT_FORMAT.md) for recommended metadata caption structure.
 
 ---
 

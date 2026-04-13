@@ -29,24 +29,24 @@ Both 2D and 3D training use CSV files with the following structure:
 | Column | Description |
 |:-------|:------------|
 | `filepath` | Path to image (PNG for 2D) or volume (NIfTI for 3D) |
-| `text` | Acquisition metadata as text (e.g., "T1w TE=10ms TR=500ms") |
+| `text` | Acquisition metadata text (see [Metadata Text Format](./METADATA_TEXT_FORMAT.md)) |
 | `label` | Integer label for grouping similar acquisitions |
 
 **Example CSV:**
 
 ```csv
 filepath,text,label
-/data/sub001_slice_050.png,T1w TE=10 TR=500 TI=900,0
-/data/sub001_slice_051.png,T1w TE=10 TR=500 TI=900,0
-/data/sub002_slice_030.png,T2w TE=80 TR=4000,1
+/data/sub001_slice_050.png,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",0
+/data/sub001_slice_051.png,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",0
+/data/sub002_slice_030.png,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)",1
 ```
 
 For 3D, each row points to a full volume:
 
 ```csv
 filepath,text,label
-/data/sub001_T1w.nii.gz,T1w TE=10 TR=500 TI=900,0
-/data/sub002_T2w.nii.gz,T2w TE=80 TR=4000,1
+/data/sub001_T1w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",0
+/data/sub002_T2w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)",1
 ```
 
 ---

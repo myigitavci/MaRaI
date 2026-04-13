@@ -53,7 +53,7 @@ For **batch mode**, a CSV file is required with the following columns:
 | Column | Description |
 |:-------|:------------|
 | `filepath` | Absolute path to the NIfTI file |
-| `text` | Acquisition metadata string (e.g. `"T1w, TE 2.5ms, TR 2000ms"`) |
+| `text` | Acquisition metadata text (see [Metadata Text Format](./METADATA_TEXT_FORMAT.md)) |
 | `label` | Sequence label (e.g. `t1w`, `t2w`, `flair`) |
 | `pair` | Integer ID grouping source/target volumes that belong to the same subject |
 | `orientation` | *(optional)* slice orientation, default `axial` |
@@ -62,8 +62,8 @@ For **batch mode**, a CSV file is required with the following columns:
 Example CSV row:
 ```
 filepath,text,label,pair
-/data/sub01_t1w.nii.gz,"T1-weighted MRI, echo time 2.5ms, repetition time 2000ms",t1w,1
-/data/sub01_t2w.nii.gz,"T2-weighted MRI, echo time 90ms, repetition time 4000ms",t2w,1
+/data/sub01_t1w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",t1w,1
+/data/sub01_t2w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)",t2w,1
 ```
 
 ---
@@ -92,7 +92,7 @@ Output: `/results/sub01/sub01_t1w_to_sub01_t2w_dist_clip.nii.gz`
 cd src
 python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
-    --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
+    --target-text  "A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)" \
     --weights      ${DISTCLIP_WEIGHTS} \
     --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/sub01/
@@ -104,7 +104,7 @@ Output: `/results/sub01/sub01_t1w_dist_clip_text.nii.gz`
 python -m dist_clip.test single \
     --source       /data/sub01_t1w.nii.gz \
     --target       /data/sub01_t2w.nii.gz \
-    --target-text  "T2-weighted MRI, echo time 90ms, repetition time 4000ms" \
+    --target-text  "A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)" \
     --weights      ${DISTCLIP_WEIGHTS} \
     --clip-weights ${MRCLIP_FOR_DISTCLIP} \
     --out-dir      /results/sub01/
