@@ -56,7 +56,6 @@ For **batch mode**, a CSV file is required with the following columns:
 | `text` | Acquisition metadata text (see [Metadata Text Format](./METADATA_TEXT_FORMAT.md)) |
 | `pair` | Integer ID grouping source/target volumes that belong to the same subject |
 | `sequence` | *(optional)* Sequence (T1w, T2w, FLAIR and so on) |
-
 | `label` | *(optional)* Label from MR-CLIP Pairings |
 | `orientation` | *(optional)* slice orientation, default `axial` |
 | `site` | *(optional)* scanner site identifier |
