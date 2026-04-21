@@ -54,16 +54,18 @@ For **batch mode**, a CSV file is required with the following columns:
 |:-------|:------------|
 | `filepath` | Absolute path to the NIfTI file |
 | `text` | Acquisition metadata text (see [Metadata Text Format](./METADATA_TEXT_FORMAT.md)) |
-| `label` | Sequence label (e.g. `t1w`, `t2w`, `flair`) |
 | `pair` | Integer ID grouping source/target volumes that belong to the same subject |
+| `sequence` | *(optional)* Sequence (T1w, T2w, FLAIR and so on) |
+
+| `label` | *(optional)* Label from MR-CLIP Pairings |
 | `orientation` | *(optional)* slice orientation, default `axial` |
 | `site` | *(optional)* scanner site identifier |
 
 Example CSV row:
 ```
 filepath,text,label,pair
-/data/sub01_t1w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",t1w,1
-/data/sub01_t2w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)",t2w,1
+/data/sub01_t1w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T1, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.010, 0.500, 0.900, 90)",10,1
+/data/sub01_t2w.nii.gz,"A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (GE, SIGNA_HDx, 1.5), Acquisition (Description, Sequence, Variant): (Ax T2, SE, SK), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.10192, 5.36, NONE, 90)",32,1
 ```
 
 ---
