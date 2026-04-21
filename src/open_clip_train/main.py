@@ -39,10 +39,8 @@ from open_clip_train.distributed import is_master, init_distributed_device, broa
 from open_clip_train.logger import setup_logging
 from open_clip_train.params import parse_args
 from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
-from open_clip_train.train import train_one_epoch, evaluate, train_one_epoch_vision_only, evaluate_vision_only,linear_probe,test_metrics
+from open_clip_train.train import train_one_epoch, evaluate, train_one_epoch_vision_only, evaluate_vision_only,test_metrics
 from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
-from open_clip_train.linear import linear_probe_from_scratch, test_existing_classifier
-from open_clip_train.quality_control_heatmap import quality_control_heatmap
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -454,20 +452,7 @@ def main(args):
         epoch=start_epoch,
         tokenizer=tokenizer,
     )
-    assert len(data), 'At least one train or eval dataset must be specified.'
-    if args.linear:
-        linear_probe(model, data, start_epoch, args, tokenizer=tokenizer)
-        return
-    if args.quality_control_heatmap:
-        quality_control_heatmap(model, data, start_epoch, args, tokenizer=tokenizer, error_types=args.quality_control_heatmap_error_types)
-        return    
-    if args.linear_sequence:
-        if args.train_data is not None:
-            linear_probe_from_scratch(model, data, args)
-            return
-        else:
-            test_existing_classifier(model, data, args)
-            return
+    assert len(data), 'At least one train or eval dataset must be specified.' 
     if args.test:
         test_metrics(model, data, start_epoch, args, tokenizer=tokenizer)
         return
