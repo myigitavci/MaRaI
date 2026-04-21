@@ -210,13 +210,14 @@ python -m open_clip_train.main \
     --dataset-type=csv-3d \
     --model=ViT-B-16 \
     --vis_3d \
-    --force-image-size 128 128 128 \
+    --force-image-size 224 \
     --batch-size=32 \
     --device=cuda \
     --logs=/path/to/logs \
     --name=mr_clip_3d \
     --resume=latest \
     --test
+    --distance
 ```
 
 > 📖 See the [Training Guide](docs/TRAINING.md) and [Testing Guide](docs/TESTING.md) for complete documentation.

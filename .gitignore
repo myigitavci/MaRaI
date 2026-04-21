@@ -32,6 +32,7 @@ ENV/
 .vscode/
 *.swp
 *.swo
+weights/
 
 # Logs & Experiments
 **/wandb/

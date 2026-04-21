@@ -33,7 +33,7 @@ Before testing, ensure you have:
 | Model | Type | Resolution | Description | Download |
 |:------|:-----|:-----------|:------------|:---------|
 | MR-CLIP 2D | ViT-B/16 | 20×20 bins | 2D slice model | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
-| MR-CLIP 3D | ViT-B/16-3D | 160×192×160 | 3D volume model (no skull) | 🔜 Coming Soon |
+| MR-CLIP 3D | ViT-B/16-3D | 224×224×224 | 3D volume model (no skull) | [⬇️ Download](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
 
 ### Weight Placement
 
@@ -125,14 +125,16 @@ python -m open_clip_train.main \
     --dataset-type=csv-3d \
     --model=ViT-B-16 \
     --vis_3d \
-    --force-image-size 160 192 160 \
+    --force-image-size 224 \
+    --textcontextlength 98 \
     --batch-size=32 \
     --workers=8 \
     --device=cuda \
     --logs=/path/to/logs \
     --name=mr_clip_3d \
     --resume=latest \
-    --test
+    --test \
+    --distance
 ```
 
 ### Full Test Command (with all outputs)
@@ -146,8 +148,8 @@ python -m open_clip_train.main \
     --dataset-type=csv-3d \
     --model=ViT-B-16 \
     --vis_3d \
-    --force-image-size 160 192 160 \
-    --textcontextlength 108 \
+    --force-image-size 224 \
+    --textcontextlength 98 \
     --batch-size=32 \
     --workers=8 \
     --device=cuda \
@@ -155,6 +157,7 @@ python -m open_clip_train.main \
     --name=mr_clip_3d \
     --resume=latest \
     --multipositiveloss \
+    --distance \
     --test \
     --tracepreds \
     --save-embeddings
@@ -165,7 +168,8 @@ python -m open_clip_train.main \
 | Parameter | Description |
 |:----------|:------------|
 | `--vis_3d` | **Required** for 3D models |
-| `--force-image-size D H W` | Must match training resolution |
+| `--force-image-size` | Must match training resolution (for public MR-CLIP 3D: `224`) |
+| `--distance` | Enable distance-aware loss/evaluation behavior expected by released 3D setup |
 | `--skull` | Use if model was trained with skull |
 
 ---
