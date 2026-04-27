@@ -941,13 +941,18 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
             logit_scale = model.logit_scale.exp().detach().cpu()
 
     # -------------------- Block 1: Image-to-Text Metrics -------------------- #
+    logging.info(
+        "test_metrics: IMPORTANT — the default test metrics below use only UNIQUE caption texts "
+        "(same labels but slightly different captions are removed). This usually makes results lower than "
+        "from normal evaluation metrics."
+    )
     # Precompute text features (NxD) in batches.
     # Global dictionary to track unique texts and their corresponding labels
     global_text_map = {}
     global_label_map = {}
     text_features_list = []
-    if args.save_embeddings:
-        text_features_list_all = []
+    # Always populated: used for general N×N metrics and save_embeddings.
+    text_features_list_all = []
     with torch.no_grad():
         for i in range(0, num_samples, batch_size):
             # Initialize batch_texts with the captions for the current batch
@@ -955,28 +960,30 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
             batch_labels = dataset.labels[i : i + batch_size]
 
             # Process batch and update global maps
-            unique_texts = []
-            unique_labels = []
-            for text, label in zip(batch_texts, batch_labels):
+            unique_indices_in_batch = []
+            for bi, (text, label) in enumerate(zip(batch_texts, batch_labels)):
                 if text not in global_text_map:
                     global_text_map[text] = len(global_text_map)  # Assign a unique index
                     global_label_map[text] = label
-                    unique_texts.append(text)
-                    unique_labels.append(label)
+                    unique_indices_in_batch.append(bi)
 
-            # Tokenize and encode only the unique texts in this batch
-            if unique_texts:
-                batch_tokenized = tokenizer(unique_texts).to(device)
-                with autocast():
-                    batch_feats = model.encode_text(batch_tokenized)
-                text_features_list.append(batch_feats.detach().cpu())
-            if args.save_embeddings:
-                batch_tokenized = tokenizer(batch_texts).to(device)
-                with autocast():
-                    batch_feats = model.encode_text(batch_tokenized)
-                text_features_list_all.append(batch_feats.detach().cpu())
+            # Encode all batch captions once; derive deduped + full views from same forward pass.
+            batch_tokenized = tokenizer(batch_texts).to(device)
+            with autocast():
+                batch_feats_all = model.encode_text(batch_tokenized)
+            batch_feats_all = batch_feats_all.detach().cpu()
+            text_features_list_all.append(batch_feats_all)
+            if unique_indices_in_batch:
+                text_features_list.append(batch_feats_all[unique_indices_in_batch])
     # Concatenate all text features
     text_features = torch.cat(text_features_list, dim=0)  # shape: (N, D)
+
+    # Full per-row matrix for general N×N metrics (same candidate pool as evaluate()).
+    text_features_full = (
+        torch.cat(text_features_list_all, dim=0)
+        if text_features_list_all
+        else text_features
+    )
 
     # Map global indices to filtered labels
     filtered_labels = [global_label_map[text] for text in global_text_map.keys()]
@@ -1135,11 +1142,10 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
     for k in [1, 5, 10]:
         overall_metrics[f"image_to_text_R@{k}"] = np.mean(i2t_ranks < k)
     if args.save_embeddings:
-        text_features_list_all = torch.cat(text_features_list_all, dim=0)  # shape: (N, D)
         # Save text embeddings, labels, and filepaths
         # Save text embeddings, labels, and captions (filepaths)
         text_emb_dict = {
-            "embeddings": text_features_list_all.numpy(),
+            "embeddings": text_features_full.numpy(),
             "labels": filtered_labels,
             "captions": list(global_text_map.keys())
         }
@@ -1243,8 +1249,65 @@ def test_metrics(model, data, start_epoch, args, tb_writer=None, tokenizer=None)
             pickle.dump(image_emb_dict, f)
 
         print(f"Saved embeddings, labels, and captions to {save_path}")
-    # Free image_features to reclaim memory.
+    # -------------------- Block 3: General N×N retrieval metrics -------------------- #
+    # Mirrors evaluate()'s `_general` protocol:
+    #   - full per-row text pool (N rows, duplicates kept)
+    #   - GT for row i: all rows with same class label
+    logging.info(
+        "test_metrics: IMPORTANT — now computing *_general_* metrics using ALL dataset rows "
+        "(same labels but slightly different captions are kept). This is the protocol followed in the paper."
+    )
+    if num_samples > 0 and text_features_full.size(0) == num_samples:
+        labels_list = [dataset.labels[k] for k in range(num_samples)]
+        label_to_indices = defaultdict(list)
+        for k, lbl in enumerate(labels_list):
+            label_to_indices[lbl].append(k)
+
+        i2t_general_ranks = []
+        t2i_general_ranks = []
+        with torch.no_grad():
+            for k in range(num_samples):
+                gt_indices = torch.tensor(label_to_indices[labels_list[k]], dtype=torch.long)
+                if gt_indices.numel() == 0:
+                    continue
+
+                sim_i2t = (logit_scale * (image_features[k:k + 1] @ text_features_full.t())).squeeze(0)
+                ranking_i2t = torch.argsort(sim_i2t, descending=True)
+                rank_pos = torch.nonzero(torch.isin(ranking_i2t, gt_indices), as_tuple=True)[0]
+                i2t_general_ranks.append(rank_pos.min().item())
+
+                sim_t2i = (logit_scale * (text_features_full[k:k + 1] @ image_features.t())).squeeze(0)
+                ranking_t2i = torch.argsort(sim_t2i, descending=True)
+                rank_pos = torch.nonzero(torch.isin(ranking_t2i, gt_indices), as_tuple=True)[0]
+                t2i_general_ranks.append(rank_pos.min().item())
+
+        i2t_general_ranks = np.array(i2t_general_ranks)
+        t2i_general_ranks = np.array(t2i_general_ranks)
+        np.save(os.path.join(args.checkpoint_path, "i2t_general_ranks.npy"), i2t_general_ranks)
+        np.save(os.path.join(args.checkpoint_path, "t2i_general_ranks.npy"), t2i_general_ranks)
+
+        if i2t_general_ranks.size > 0:
+            overall_metrics["image_to_text_general_mean_rank"] = float(i2t_general_ranks.mean() + 1)
+            overall_metrics["image_to_text_general_median_rank"] = float(np.floor(np.median(i2t_general_ranks)) + 1)
+            for k in [1, 5, 10]:
+                overall_metrics[f"image_to_text_general_R@{k}"] = float(np.mean(i2t_general_ranks < k))
+
+        if t2i_general_ranks.size > 0:
+            overall_metrics["text_to_image_general_mean_rank"] = float(t2i_general_ranks.mean() + 1)
+            overall_metrics["text_to_image_general_median_rank"] = float(np.floor(np.median(t2i_general_ranks)) + 1)
+            for k in [1, 5, 10]:
+                overall_metrics[f"text_to_image_general_R@{k}"] = float(np.mean(t2i_general_ranks < k))
+
+    else:
+        logging.warning(
+            "test_metrics: skipping general N×N metrics — text_features_full rows=%s, num_samples=%s",
+            text_features_full.size(0) if text_features_full is not None else None,
+            num_samples,
+        )
+
+    # Free image/text features to reclaim memory.
     del image_features
+    del text_features_full
 
     # -------------------- Logging and Saving Metrics -------------------- #
     if overall_metrics:
