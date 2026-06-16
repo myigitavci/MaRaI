@@ -184,6 +184,11 @@ def main(args):
             # sync found checkpoint path to all ranks
             resume_from = broadcast_object(args, resume_from)
         args.resume = resume_from
+        
+        if args.test and args.resume is None:
+            raise FileNotFoundError(
+                f"No checkpoint was found for --resume=latest in {checkpoint_path}."
+            )
 
     if args.copy_codebase:
         copy_codebase(args)
@@ -426,6 +431,20 @@ def main(args):
     start_epoch = 0
     if args.resume is not None:
         checkpoint = pt_load(args.resume, map_location='cpu')
+        
+        # explicit architecture check to prevent cryptic dimension mismatches
+        check_sd = checkpoint.get("state_dict", checkpoint)
+        conv_weight = None
+        for k, v in check_sd.items():
+            if 'conv1.weight' in k:
+                conv_weight = v
+                break
+        if conv_weight is not None:
+            if args.vis_3d and len(conv_weight.shape) != 5:
+                raise ValueError(f"Expected a 3D checkpoint (5D conv weights) but found {len(conv_weight.shape)}D weights. Please ensure you are not loading a 2D checkpoint into a 3D model.")
+            elif not args.vis_3d and len(conv_weight.shape) != 4:
+                raise ValueError(f"Expected a 2D checkpoint (4D conv weights) but found {len(conv_weight.shape)}D weights. Please ensure you are not loading a 3D checkpoint into a 2D model.")
+
         if 'epoch' in checkpoint:
             # resuming a train checkpoint w/ epoch and optimizer state
             start_epoch = checkpoint["epoch"]

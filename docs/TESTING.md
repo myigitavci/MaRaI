@@ -33,7 +33,7 @@ Before testing, ensure you have:
 | Model | Type | Resolution | Description | Download |
 |:------|:-----|:-----------|:------------|:---------|
 | MR-CLIP 2D | ViT-B/16 | 20×20 bins | 2D slice model | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=sharing) |
-| MR-CLIP 3D | ViT-B/16-3D | 224×224×224 | 3D volume model (no skull) | [⬇️ Download](https://drive.google.com/file/d/11D6sVfHYKR-KADDd16GMt-MtmvXu9SjQ/view?usp=sharing) |
+| MR-CLIP 3D | ViT-B/16-3D | 224×224×224 | 3D volume model (no skull) | [⬇️ Download](https://drive.google.com/file/d/1zCqmEO4wdxnJvjJc6aWKOByXVKdnwIfd/view?usp=sharing) |
 
 ### Weight Placement
 
