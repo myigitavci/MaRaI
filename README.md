@@ -70,13 +70,13 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 ---
 
-### Dist-CLIP — MRI Contrast Harmonisation
+### DIS-CLIP — MRI Contrast Harmonisation
 <div align="center">
   <img src="docs/DIST_CLIP_Short.png" alt="3D MR-CLIP" width="700"/>
 </div>
 
 <br/>
-**Dist-CLIP** synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen **MR-CLIP** backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
+**DDICTIP** synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen **MR-CLIP** backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
 
 **Key highlights:**
 - 🎨 Harmonise across T1w, T2w, FLAIR, T2\*, PDw and more
@@ -109,7 +109,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | MR-SYNTH | 3D Diffusion UNet (MAISI-v2) + Autoencoder | 3D Volumes (NIfTI) | RFlow, 30 steps | *Weights to be shared* |
 
 > [!IMPORTANT]
-> Dist-CLIP inference needs **both** checkpoints:
+> Dist-CLISinference needs **both** checkpoints:
 > - `--weights`: Dist-CLIP checkpoint
 > - `--clip-weights`: MR-CLIP (1-ch) checkpoint 
 
@@ -169,7 +169,7 @@ Detailed instructions for evaluation:
 <tr>
 <td width="50%">
 
-#### 📖 [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md)
+#### 📖 [Dist-CLISTesting Guide](docs/DIST_CLIP_TESTING.md)
 
 How to run MRI harmonisation:
 - Single volume inference (image- or text-guided)
