@@ -121,7 +121,13 @@ def generate_sample(
                 pred_cond, pred_uncond = out2.chunk(2, dim=0)
                 model_output = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
 
-            image = noise_scheduler.step(model_output, t, image, next_t)["prev_sample"]
+            step_out = noise_scheduler.step(model_output, t, image, next_t)
+            if isinstance(step_out, tuple):
+                image = step_out[0]
+            elif isinstance(step_out, dict):
+                image = step_out.get("prev_sample", step_out)
+            else:
+                image = step_out
 
         # Decode latent representation
         val_output = recon_model(image.float())

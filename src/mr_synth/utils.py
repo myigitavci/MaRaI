@@ -17,6 +17,37 @@ from monai.bundle import ConfigParser
 from monai.utils import optional_import
 
 nib, _ = optional_import("nibabel")
+def _patch_monai_metakeys():
+    try:
+        from monai.utils.enums import MetaKeys
+
+        orig_missing = getattr(MetaKeys, "_missing_", None)
+
+        @classmethod
+        def _safe_missing(cls, value):
+            if orig_missing is not None:
+                try:
+                    res = orig_missing(value)
+                    if isinstance(res, cls):
+                        return res
+                except Exception:
+                    pass
+            try:
+                member = str.__new__(cls, value)
+            except Exception:
+                member = object.__new__(cls)
+            member._name_ = str(value).upper()
+            member._value_ = value
+            cls._value2member_map_[value] = member
+            cls._member_map_[member._name_] = member
+            return member
+
+        MetaKeys._missing_ = _safe_missing
+    except Exception:
+        pass
+
+
+_patch_monai_metakeys()
 
 
 def define_instance(args: Namespace | dict, key: str) -> Any:

@@ -14,7 +14,7 @@ timm
 
 # Medical imaging
 nibabel
-monai
+monai>=1.5.0
 SimpleITK
 torchio
 pydicom

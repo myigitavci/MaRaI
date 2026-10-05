@@ -22,7 +22,7 @@ Usage:
       --phase 2 \\
       --embeddings-pkl data/mrclip_embeddings.pkl \\
       --data-json data/dataset_mrclip.json \\
-      --existing-ckpt models/mrclip_phase1_best.pt \\
+      --existing-ckpt models/mr_synth_phase1_best.pt \\
       --n-epochs 100 \\
       --lr 1e-5 \\
       --proj-lr 1e-4
@@ -181,12 +181,12 @@ def train():
                 best_loss = avg_loss
                 torch.save(
                     {"model_state_dict": model.state_dict(), "epoch": epoch, "loss": best_loss},
-                    os.path.join(cli_args.output_dir, f"mrclip_phase{cli_args.phase}_best.pt"),
+                    os.path.join(cli_args.output_dir, f"mr_synth_phase{cli_args.phase}_best.pt"),
                 )
             if epoch % cli_args.save_interval == 0 or epoch == n_epochs:
                 torch.save(
                     {"model_state_dict": model.state_dict(), "epoch": epoch, "loss": avg_loss},
-                    os.path.join(cli_args.output_dir, f"mrclip_phase{cli_args.phase}_epoch_{epoch}.pt"),
+                    os.path.join(cli_args.output_dir, f"mr_synth_phase{cli_args.phase}_epoch_{epoch}.pt"),
                 )
 
     if dist.is_initialized():

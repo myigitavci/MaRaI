@@ -3,7 +3,7 @@
 
   <br/><br/>
 
-  [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
+  [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
   [![PyTorch](https://img.shields.io/badge/Framework-PyTorch-EE4C2C.svg)](https://pytorch.org/)
   [![arXiv](https://img.shields.io/badge/arXiv-2507.00043-b31b1b.svg)](https://arxiv.org/abs/2507.00043)
 
@@ -125,7 +125,7 @@ git clone https://github.com/myigitavci/MaRaI.git
 cd MaRaI
 
 # Set up environment
-conda create -n marai python=3.8 -y
+conda create -n marai python=3.10 -y
 conda activate marai
 pip install -r requirements.txt
 ```
@@ -272,18 +272,20 @@ python -m dist_clip.test single \
 ### MR-SYNTH — 3D Brain MRI Synthesis
 
 ```bash
+conda activate maisi
 cd src
 
 # Metadata text-conditioned 3D brain generation (30 RFlow steps)
 python -m mr_synth.infer \
     --metadata-text "A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (Siemens, MAGNETOM_Vida, 3.0), Acquisition (Description, Sequence, Variant): (t2_tse_tra, SE, SK_SP), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.08000, 4.500, NONE, 90.0)" \
-    --mrclip-ckpt /path/to/mr_synth_phase2.pt \
+    --mrsynth-ckpt /path/to/mr_synth_phase2.pt \
     --clip-checkpoint /path/to/mr_clip_3d.pt \
+    --autoencoder-path /path/to/autoencoder_v1.pt \
     --cfg-scale 3.0 \
-    --output-dir /results/mr_synth/
+    --output-dir results/mr_synth/
 ```
 
-> 📖 See the [MR-SYNTH Guide](docs/MR_SYNTH.md) for complete documentation and validation benchmarks.
+> 📖 See the [MR-SYNTH Guide](docs/MR_SYNTH.md) for complete documentation.
 
 ---
 

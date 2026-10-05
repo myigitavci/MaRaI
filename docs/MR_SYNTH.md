@@ -59,7 +59,7 @@ Built on NVIDIA's [NV-Generate-CTMR](https://github.com/NVIDIA-Medtech/NV-Genera
 ```bash
 python -m mr_synth.infer \
     --metadata-text "A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (Siemens, MAGNETOM_Vida, 3.0), Acquisition (Description, Sequence, Variant): (t2_tse_tra, SE, SK_SP), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.08000, 4.500, NONE, 90.0)" \
-    --mrclip-ckpt weights/mr_synth_phase2.pt \
+    --mrsynth-ckpt weights/mr_synth_phase2.pt \
     --clip-checkpoint weights/mr_clip_3d.pt \
     --cfg-scale 3.0 \
     --seed 1234 \
@@ -91,7 +91,7 @@ python -m mr_synth.train \
     --phase 2 \
     --embeddings-pkl data/mrclip_embeddings.pkl \
     --data-json data/dataset_mrclip.json \
-    --existing-ckpt models/mr_synth/mrclip_phase1_best.pt \
+    --existing-ckpt models/mr_synth/mr_synth_phase1_best.pt \
     --n-epochs 100 \
     --lr 1e-5 \
     --proj-lr 1e-4 \
