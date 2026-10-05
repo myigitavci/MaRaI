@@ -1,0 +1,22 @@
+{
+    "num_output_samples": 1,
+    "num_inference_steps": 30,
+    "output_size": [
+        256,
+        256,
+        256
+    ],
+    "image_output_ext": ".nii.gz",
+    "spacing": [
+        1.0,
+        1.0,
+        1.0
+    ],
+    "autoencoder_sliding_window_infer_size": [96, 96, 96],
+    "autoencoder_sliding_window_infer_overlap": 0.25,
+    "autoencoder_tp_num_splits": 2,
+    "diffusion_unet": "$@diffusion_unet_def",
+    "autoencoder": "$@autoencoder_def",
+    "modality": 9,
+    "cfg_guidance_scale": 3.0
+}

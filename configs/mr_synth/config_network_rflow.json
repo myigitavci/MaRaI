@@ -1,0 +1,74 @@
+{
+    "spatial_dims": 3,
+    "image_channels": 1,
+    "latent_channels": 4,
+    "include_body_region": false,
+    "mask_generation_latent_shape": [
+        4,
+        64,
+        64,
+        64
+    ],
+    "autoencoder_def": {
+        "_target_": "monai.apps.generation.maisi.networks.autoencoderkl_maisi.AutoencoderKlMaisi",
+        "spatial_dims": "@spatial_dims",
+        "in_channels": "@image_channels",
+        "out_channels": "@image_channels",
+        "latent_channels": "@latent_channels",
+        "num_channels": [
+            64,
+            128,
+            256
+        ],
+        "num_res_blocks": [2,2,2],
+        "norm_num_groups": 32,
+        "norm_eps": 1e-06,
+        "attention_levels": [
+            false,
+            false,
+            false
+        ],
+        "with_encoder_nonlocal_attn": false,
+        "with_decoder_nonlocal_attn": false,
+        "use_checkpointing": false,
+        "use_convtranspose": false,
+        "norm_float16": true,
+        "num_splits": 4,
+        "dim_split": 1
+    },
+    "diffusion_unet_def": {
+        "_target_": "monai.apps.generation.maisi.networks.diffusion_model_unet_maisi.DiffusionModelUNetMaisi",
+        "spatial_dims": "@spatial_dims",
+        "in_channels": "@latent_channels",
+        "out_channels": "@latent_channels",
+        "num_channels": [64, 128, 256, 512],
+        "attention_levels": [
+            false,
+            false,
+            true,
+            true
+        ],
+        "num_head_channels": [
+            0,
+            0,
+            32,
+            32
+        ],
+        "num_res_blocks": 2,
+        "use_flash_attention": true,
+        "include_top_region_index_input": "@include_body_region",
+        "include_bottom_region_index_input": "@include_body_region",
+        "include_spacing_input": true,
+        "num_class_embeds": 128,
+        "resblock_updown": true,
+        "include_fc": true
+    },
+    "noise_scheduler": {
+        "_target_": "monai.networks.schedulers.rectified_flow.RFlowScheduler",
+        "num_train_timesteps": 1000,
+        "use_discrete_timesteps": false,
+        "use_timestep_transform": true,
+        "sample_method": "uniform",
+        "scale": 1.4
+    }
+}

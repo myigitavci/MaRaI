@@ -59,3 +59,4 @@ core.*
 sync.sh
 gpu*sync.sh
 *.jsonl
+nv_generate_temp/

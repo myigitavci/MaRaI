@@ -87,6 +87,17 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 
 ---
 
+### MR-SYNTH — Metadata-Conditioned 3D Image Synthesis
+
+**MR-SYNTH** is a volumetric 3D MRI generative diffusion model conditioned directly on clinical DICOM metadata prompts. Built upon NVIDIA's pretrained [NV-Generate-CTMR](https://github.com/NVIDIA-Medtech/NV-Generate-CTMR) (MAISI-v2 Rectified Flow) backbone and continuous **MR-CLIP** representations, MR-SYNTH enables controllable, physically grounded 3D brain scan synthesis.
+
+**Key highlights:**
+- 🧠 **Continuous Parameter Control**: Modulate Echo Time ($TE$), Repetition Time ($TR$), Inversion Time ($TI$), and Flip Angle with adherence to MRI Bloch equations
+- 📦 **Native 3D Generation**: Generates complete high-resolution 3D NIfTI brain volumes ($256 \times 256 \times 128 / 256$) in 30 rectified flow steps
+- 🔗 **Conditioned on MR-CLIP**: Injects continuous 512-dim MR-CLIP text embeddings directly into diffusion UNet time embeddings
+
+---
+
 ## 📦 Pretrained Weights
 
 | Model | Type | Input | Config | Download |
@@ -95,15 +106,12 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | [⬇️ Download](https://drive.google.com/file/d/1zCqmEO4wdxnJvjJc6aWKOByXVKdnwIfd/view?usp=sharing) |
 | MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
 | DIST-CLIP | U-Net decoder + style modules | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
+| MR-SYNTH | 3D Diffusion UNet (MAISI-v2) + Autoencoder | 3D Volumes (NIfTI) | RFlow, 30 steps | *Weights to be shared* |
 
 > [!IMPORTANT]
 > Dist-CLIP inference needs **both** checkpoints:
 > - `--weights`: Dist-CLIP checkpoint
 > - `--clip-weights`: MR-CLIP (1-ch) checkpoint 
-
-
-
-
 
 ---
 
@@ -170,7 +178,17 @@ How to run MRI harmonisation:
 - Key parameters
 
 </td>
-<td></td>
+<td width="50%">
+
+#### 📖 [MR-SYNTH Guide](docs/MR_SYNTH.md)
+
+Metadata-conditioned 3D MRI generation:
+- Text prompt & CSV synthesis
+- Pulse sequence parameters (TE, TR, TI, FA)
+- Two-phase training pipeline
+- 3D NIfTI volume generation
+
+</td>
 </tr>
 </table>
 
@@ -216,7 +234,7 @@ python -m open_clip_train.main \
     --logs=/path/to/logs \
     --name=mr_clip_3d \
     --resume=latest \
-    --test
+    --test \
     --distance
 ```
 
@@ -250,6 +268,22 @@ python -m dist_clip.test single \
 ```
 
 > 📖 See the [Dist-CLIP Testing Guide](docs/DIST_CLIP_TESTING.md) for full documentation and [Metadata Text Format](docs/METADATA_TEXT_FORMAT.md) for recommended metadata caption structure.
+
+### MR-SYNTH — 3D Brain MRI Synthesis
+
+```bash
+cd src
+
+# Metadata text-conditioned 3D brain generation (30 RFlow steps)
+python -m mr_synth.infer \
+    --metadata-text "A brain MRI, plane axial, Scanner (Manufacturer, Model, Field Strength): (Siemens, MAGNETOM_Vida, 3.0), Acquisition (Description, Sequence, Variant): (t2_tse_tra, SE, SK_SP), Imaging Parameters (Echo Time, Repetition Time, Inversion Time, Flip Angle): (0.08000, 4.500, NONE, 90.0)" \
+    --mrclip-ckpt /path/to/mr_synth_phase2.pt \
+    --clip-checkpoint /path/to/mr_clip_3d.pt \
+    --cfg-scale 3.0 \
+    --output-dir /results/mr_synth/
+```
+
+> 📖 See the [MR-SYNTH Guide](docs/MR_SYNTH.md) for complete documentation and validation benchmarks.
 
 ---
 
@@ -311,5 +345,6 @@ For questions, collaborations, or issues — please [open an issue](https://gith
 ## 🙏 Acknowledgements
 
 - [OpenCLIP](https://github.com/mlfoundations/open_clip) — Foundation for the MR-CLIP codebase
+- [NV-Generate-CTMR](https://github.com/NVIDIA-Medtech/NV-Generate-CTMR) — 3D Latent Diffusion Model & MAISI framework underlying MR-SYNTH
 
 ---

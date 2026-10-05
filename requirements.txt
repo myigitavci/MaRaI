@@ -44,3 +44,6 @@ click
 typer
 rich
 gdown
+einops
+fire
+PyYAML
