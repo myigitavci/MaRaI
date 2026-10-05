@@ -76,7 +76,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 </div>
 
 <br/>
-**DIST-CLIP** synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen **MR-CLIP** backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
+DIST-CLIP synthesises how an MRI scan would look if acquired with a different contrast protocol. It uses a frozen MR-CLIP backbone to understand acquisition metadata, then applies a text-conditioned U-Net decoder to perform style transfer.
 
 **Key highlights:**
 - 🎨 Harmonise across T1w, T2w, FLAIR, T2\*, PDw and more
@@ -94,7 +94,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 **Key highlights:**
 - 🧠 **Continuous Parameter Control**: Modulate Echo Time ($TE$), Repetition Time ($TR$), Inversion Time ($TI$), and Flip Angle with adherence to MRI Bloch equations
 - 📦 **Native 3D Generation**: Generates complete high-resolution 3D NIfTI brain volumes ($256 \times 256 \times 128 / 256$) in 30 rectified flow steps
-- 🔗 **Conditioned on MR-CLIP**: Injects continuous 512-dim MR-CLIP text embeddings directly into diffusion UNet time embeddings
+- 🔗 **Conditioned on MR-CLIP**: Injects continuous 512-dim MR-CLIP text embeddings directly into diffusion UNet
 
 ---
 
@@ -106,7 +106,7 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 | MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | [⬇️ Download](https://drive.google.com/file/d/1zCqmEO4wdxnJvjJc6aWKOByXVKdnwIfd/view?usp=sharing) |
 | MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
 | DIST-CLIP | U-Net decoder + style modules | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
-| MR-SYNTH | 3D Diffusion UNet (MAISI-v2) + Autoencoder | 3D Volumes (NIfTI) | RFlow, 30 steps | *Weights to be shared* |
+| MR-SYNTH | 3D Diffusion UNet (MAISI-v2) + Autoencoder | Metadata | RFlow, 30 steps | *Weights to be shared* |
 
 > [!IMPORTANT]
 > Dist-CLIP inference needs **both** checkpoints:
