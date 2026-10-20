@@ -137,6 +137,8 @@ python -m open_clip_train.main \
 - **Input**: NIfTI volumes (`.nii` or `.nii.gz`)
 - **Preprocessing**: Automatic cropping, resizing, and normalization
 
+The **MR-RATE age + sex checkpoint** uses registered, skull-on volumes, `--skull`, `--force-image-size 128 128 128`, and `--textcontextlength 98`. Its captions include `A brain MRI, Age:X, Sex:X, plane ...`, followed by the existing acquisition metadata. Resizing and normalization otherwise use the same pipeline. See the [checkpoint-specific instructions](TESTING.md#mr-rate-checkpoint-age--sex-skull-on) for weights and CSV formatting.
+
 ### Basic Command
 
 ```bash

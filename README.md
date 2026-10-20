@@ -68,6 +68,8 @@ Clinical imaging data is governed by complex acquisition protocols (pulse sequen
 - 🎯 Multi-positive contrastive loss for protocol-level learning
 - ⚡ Gradient checkpointing for memory-efficient training
 
+**MR-RATE variant:** An additional MR-CLIP 3D checkpoint trained on MR-RATE uses registered, skull-on images and age/sex metadata in captions (`A brain MRI, Age:X, Sex:X, plane ...`). It uses a text context length of **98** and the existing 3D preprocessing pipeline, including resizing to **128×128×128** and normalization. See the [MR-RATE evaluation instructions](docs/TESTING.md#mr-rate-checkpoint-age--sex-skull-on).
+
 ---
 
 ### DIST-CLIP — MRI Contrast Harmonisation
@@ -102,9 +104,10 @@ DIST-CLIP synthesises how an MRI scan would look if acquired with a different co
 
 | Model | Type | Input | Config | Download |
 |:------|:-----|:------|:-------|:---------|
-| MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1jap3aCEPrZwvFMD8LKSBB2oTYz2HgpIG/view?usp=drive_link) |
+| MR-CLIP 2D | ViT-B/16 | 2D Slices | 20×20 bins (ET/RT) | [⬇️ Download](https://drive.google.com/file/d/1NTU1ovzq2xhFHgiBXzAXNn4vpW1To-yB/view?usp=sharing) |
 | MR-CLIP 3D | ViT-B/16-3D | 3D Volumes | 20×20 bins (ET/RT), no skull | [⬇️ Download](https://drive.google.com/file/d/1zCqmEO4wdxnJvjJc6aWKOByXVKdnwIfd/view?usp=sharing) |
-| MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/1zBOagX9wUJYV5sSxKZ8M_w42lxrQPBu6/view?usp=sharing) |
+| MR-CLIP 3D (MR-RATE, age + sex) | ViT-B/16-3D | 128×128×128 volumes | Registered images with skull; age + sex in captions | [⬇️ Download](https://drive.google.com/file/d/14KxOIw_yc8ZQIxA-GzeG0QSJxe2OxX0f/view?usp=sharing) |
+| MR-CLIP (1-ch) for DIST-CLIP | ViT-B/16 | 2D Slices | Dist-CLIP Backbone | [⬇️ Download](https://drive.google.com/file/d/16E3PttStIHWM_j08lb73BthPlr2_m-YF/view?usp=drive_link) |
 | DIST-CLIP | U-Net decoder + style modules | 2D Slices (NIfTI) | enhancedv2, base\_ch=16 | [⬇️ Download](https://drive.google.com/file/d/17EisOPCILGgvsmHJXLPHLQRgPsW1ffBk/view?usp=sharing) |
 | MR-SYNTH | 3D Diffusion UNet (MAISI-v2) + Autoencoder | Metadata | RFlow, 30 steps | *Weights to be shared* |
 

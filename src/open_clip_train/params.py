@@ -93,7 +93,7 @@ def parse_args(args):
         "--skull",
         action="store_true",
         default=False,
-        help="Use 3D crop that keeps skull; also sets text context length to 120.",
+        help="Use 3D crop that keeps skull. Set --textcontextlength separately to match the checkpoint.",
     )
     parser.add_argument(
         "--no_fixed_crop",
