@@ -55,7 +55,6 @@ weights/
 # Misc
 core.*
 *.pdf
-**/_*
 sync.sh
 gpu*sync.sh
 *.jsonl
